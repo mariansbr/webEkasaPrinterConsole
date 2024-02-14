@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>2024/02/07 13:35:19.000.757,C:\Users\MrpDev\OneDrive\Dokumenty\RAD Studio\Projects\Project1.dproj=C:\Projects\webEkasaPrinterConsole\webEkasaPrinter.dproj</Transaction>
+    <Transaction>2024/02/07 13:58:36.000.603,=C:\Projects\webEkasaPrinterConsole\uServer.pas</Transaction>
+    <Transaction>2024/02/07 14:11:19.000.343,=C:\Projects\webEkasaPrinterConsole\components\superObject\superdate.pas</Transaction>
+    <Transaction>2024/02/07 14:11:41.000.802,=C:\Projects\webEkasaPrinterConsole\components\superObject\superobject.pas</Transaction>
+    <Transaction>2024/02/07 14:11:50.000.426,=C:\Projects\webEkasaPrinterConsole\components\superObject\supertimezone.pas</Transaction>
+    <Transaction>2024/02/07 14:11:57.000.959,=C:\Projects\webEkasaPrinterConsole\components\superObject\supertypes.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.748,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaFiskalPro.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.684,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaElcomm.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.990,=C:\Projects\webEkasaPrinterConsole\ekasa\Elcomm_TLB_3_0.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.808,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaMrp.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.873,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaVarosNative.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.608,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaBowa.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.924,=C:\Projects\webEkasaPrinterConsole\ekasa\ekMrp.pas</Transaction>
+    <Transaction>2024/02/07 14:14:39.000.148,=C:\Projects\webEkasaPrinterConsole\ekasa\FMEkasa.pas</Transaction>
+    <Transaction>2024/02/07 14:14:39.000.302,=C:\Projects\webEkasaPrinterConsole\ekasa\Varos.pas</Transaction>
+    <Transaction>2024/02/07 14:14:39.000.234,=C:\Projects\webEkasaPrinterConsole\ekasa\uEkasa.pas</Transaction>
+    <Transaction>2024/02/07 14:14:39.000.083,=C:\Projects\webEkasaPrinterConsole\ekasa\FiskalPro.pas</Transaction>
+    <Transaction>2024/02/07 14:15:49.000.171,=C:\Projects\webEkasaPrinterConsole\uCommon.pas</Transaction>
+    <Transaction>2024/02/07 14:16:15.000.287,=C:\Projects\webEkasaPrinterConsole\DecRound.pas</Transaction>
+    <Transaction>2024/02/07 14:16:47.000.849,=C:\Projects\webEkasaPrinterConsole\DelUp.pas</Transaction>
+    <Transaction>2024/02/07 14:17:47.000.243,=C:\Projects\webEkasaPrinterConsole\uSettings.pas</Transaction>
+    <Transaction>2024/02/07 14:17:59.000.540,=C:\Projects\webEkasaPrinterConsole\uEkasaPrinters.pas</Transaction>
+    <Transaction>2024/02/07 14:18:55.000.193,=C:\Projects\webEkasaPrinterConsole\uScannerHelper.pas</Transaction>
+    <Transaction>2024/02/07 14:19:27.000.997,=C:\Projects\webEkasaPrinterConsole\uInterfaceHelper.pas</Transaction>
+    <Transaction>2024/02/07 14:19:56.000.895,=C:\Projects\webEkasaPrinterConsole\uEkasaHelper.pas</Transaction>
+    <Transaction>2024/02/07 15:42:22.000.546,=C:\Projects\webEkasaPrinterConsole\payPackageUtils.pas</Transaction>
+    <Transaction>2024/02/07 15:46:16.000.447,C:\Projects\webEkasaPrinterConsole\ekasa\FMEkasa.pas=</Transaction>
+  </Transactions>
+</BorlandProject>

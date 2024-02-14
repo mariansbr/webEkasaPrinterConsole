@@ -1,0 +1,1179 @@
+unit eKasaFiskalPro;
+
+interface
+
+uses
+  uEkasaPrinters, DelUp;
+
+const
+  rs_connection_error = '{"errorCode":500,"error":"Nepodarilo sa spojenie s FiskalPro. Skontrolujte ju!"}';
+
+  C_BUFFER_STR_LEN = 1024;
+  C_SALES           = '0';  // predajný doklad
+  C_REFUND          = '1';  // storno predajného dokladu
+  C_RETURN          = '2';  // návrat
+  C_INVOICE         = '10'; // úhrada faktúry
+  C_INVOICE_CANCEL  = '11'; // storno úhrady faktúry
+  C_CASH_IN         = '20'; // vloženie peòazí
+  C_CASH_OUT        = '21'; // výber peòazí
+  C_NOFISCAL        = '30'; // nefiskálny doklad
+  C_PAY_INVOICE_IDX = '5';
+  C_PAYMENT_OF_INVOICE = 'Úhrada faktúry';
+  C_EAN = 'EAN: ';
+  C_PLU = 'PLU: ';
+  C_KOD = 'Kód: ';
+  C_OKP_IDX = 4;
+  C_UID_IDX = 5;
+
+resourcestring
+  rs_ekasa_status = 'Status ekasy'#13'=========='#13 +
+                    'Stav: %s'#13 +
+                    'Poèet dní do konca platnosti certifikátu: %s'#13 +
+                    'Dátum a èas konca platnosti certifikátu: %s'#13 +
+                    'DIÈ uložené v certifikáte: %s'#13 +
+                    'Nastevený typ: %s'#13 +
+                    'Poèet offline dokladov: %s';
+
+  rs_ekasa_s_1 = 'nie je aktívny mód EKasy';
+  rs_ekasa_s_0 = 'OK';
+  rs_ekasa_s_2 = 'certifikát nenájdený';
+  rs_ekasa_s_3 = 'identifikaèné údaje nenájdené';
+  rs_ekasa_s_4 = 'chyba inicializácie (worm pamä je odpojená)';
+  rs_ekasa_s_5 = 'neplatný certifikát';
+  rs_ekasa_s_6 = 'blokacia z dôvodu chybného dokladu';
+  rs_ekasa_s_7 = 'OK, ale certifikátu bude konèi platnos';
+  rs_ekasa_s_8 = 'certifikátu vypršala platnos';
+  rs_ekasa_s_9 = 'OK, ale na CHDU dochádza miesto';
+  rs_ekasa_s_10 = 'CHDU je plné';
+
+type
+  TVats = array[1..5] of currency;
+  Tbuffer_str = array [0..C_BUFFER_STR_LEN-1] of AnsiChar;
+  TDeviceType = (dtUnknown, dtVx, dtTx, dtNx, dtAx);
+
+  procedure internalInit();
+  procedure internalClose();
+
+  function eKasaFiskalProInit: boolean;
+  function eKasaFiskalProWork(action: TEkasaActions): string;
+
+var
+  vats: TVats;
+  fiskalProOpen: boolean = false;
+  buffer_str: Tbuffer_str;
+  cashRoundSupport: integer = -1; //-1 nebolo zistene, 0 nepodporovane, 1 podporovane
+
+implementation
+
+uses
+  Classes, FiskalPro, SysUtils, StrUtils, payPackageUtils, uCommon, superObject,
+  uEkasaHelper, Windows, uSettings;
+
+procedure init_buffer_str;
+var
+  i: integer;
+begin
+  for i:= Low(Tbuffer_str) to High(Tbuffer_str) do
+    buffer_str[i]:= #0;
+end;
+
+procedure set_buffer_str(value: string);
+var
+  i: integer;
+begin
+  init_buffer_str;
+  for i:= 1 to Length(value) do
+    buffer_str[i-1]:= CharToAnsiChar(value[i]);
+end;
+
+function get_buffer_str(dlzka: integer = 0): string;
+begin
+  result := AStrToStr(StrPas(PAnsiChar(@buffer_str)));
+  if dlzka > 0 then
+    result:= LeftStr(result, dlzka);
+end;
+
+function get_vatIdx(vatRate: string): string;
+var
+  i: integer;
+  vatRateCurr: currency;
+begin
+  result := '5';
+  vatRate := ReplaceStr(vatRate,'%','');
+  vatRate := ReplaceStr(vatRate,'OOD','');
+  vatRate := ReplaceStr(vatRate,'PDP','');
+  vatRate := ReplaceStr(vatRate,'CK','');
+  vatRate := ReplaceStr(vatRate,'PT','');
+  vatRate := ReplaceStr(vatRate,'UD','');
+  vatRate := ReplaceStr(vatRate,'ZPS','');
+  vatRate := ReplaceStr(vatRate,'INE','');
+  vatRateCurr := StrToCurrDef(vatRate,0);
+  for i := Low(TVats) to High(TVats) do
+    if vats[i] = vatRateCurr then begin
+      result := IntToStr(i);
+      break;
+    end;
+end;
+
+procedure clearVats;
+var
+  i: integer;
+begin
+  for i := Low(TVats) to High(TVats) do
+    vats[i] := -1;
+end;
+
+function isClearVats: boolean;
+var
+  i: integer;
+begin
+  result := true;
+  for i := Low(TVats) to High(TVats) do
+    if vats[i] >= 0 then begin
+      result := false;
+      break;
+    end;
+end;
+
+procedure internalInit();
+var
+  err: integer;
+begin
+  err := C_RCODE_6;
+
+  if not fiskalProOpen then begin
+    case fSettings.I['ekasa.connectionTyp']  of
+      ord(connectionRS232),ord(connectionUSB): err := fFiskalPro._OpenCom(fSettings.I['ekasa.comPort']); //COM/USB
+      ord(connectionTCP): err := fFiskalPro._ConnectTcp(fSettings.S['ekasa.hostAddress']); //TCP
+    end;
+    if (err <> C_RCODE_6) then exit;
+    fiskalProOpen := true;
+  end;
+end;
+
+procedure internalClose();
+begin
+  if (fiskalProOpen = false) then exit;
+  try
+    case fSettings.I['ekasa.connectionTyp'] of
+      ord(connectionRS232),ord(connectionUSB): fFiskalPro._CloseCom();
+      ord(connectionTCP): fFiskalpro._DisconnectTcp();
+    end;
+  finally
+    fiskalProOpen := false;
+  end;
+end;
+
+function init_eKasaFiskalPro: integer;
+var
+  sl: TStringList;
+  sn: string;
+  version: integer;
+  deviceType: TDeviceType;
+const
+  c_vx = 64384; //verifone
+  c_tx = 72114; //T2,T6
+  c_nx = 2221;  //N86,N5,N3
+  c_ax = 2221;  //A8
+
+  function getDeviceType(sn: string): TDeviceType;
+  begin
+    result := dtUnknown;
+    if CharInSet(sn[1], ['0'..'9']) then
+      result := dtVx  //VX: xxx-xxx-xxx
+    else if (sn[1] = 'T') then
+      result := dtTx  //TX: T2xxx,T6xxx
+    else if (sn[1] = 'N') then
+      result := dtNx  //NX: N86xxx,N5xxx,N3xxx
+    else if (sn[1] = 'A') then
+      result := dtAx; //AX: A8xxx
+  end;
+
+begin
+  result := -1;
+  isEkasaInit := false;
+
+  if CheckInstalledPackage(pckgFiskalPro,true) then begin
+    InternalInit();
+    try
+      if (cashRoundSupport = -1) then begin
+        cashRoundSupport := 0;
+        init_buffer_str();
+        result := fFiskalPro.FRINFO(@buffer_str);
+        if result <> C_RCODE_6 then exit;
+
+        sl := TStringList.Create;
+        try
+          sl.Text := get_buffer_str();
+          sn := UpperCase(sl.Strings[0]); //Sériové èíslo terminálu
+          version := StrToInt(sl.Strings[12]); //Verzia FiskalPro bez bodky
+          deviceType := getDeviceType(sn);
+          case deviceType of
+            dtVx: cashRoundSupport := ifThenEx(version >= c_vx,1,0);
+            dtTx: cashRoundSupport := ifThenEx(version >= c_tx,1,0);
+            dtNx: cashRoundSupport := ifThenEx(version >= c_nx,1,0);
+            dtAx: cashRoundSupport := ifThenEx(version >= c_ax,1,0);
+          end;
+
+          if (deviceType in [dtVx,dtTx]) then
+            fFiskalPro.FTEKASASENDCMD(PAnsiChar(AnsiString('FTDOCINFO')));
+            //toto nastavenie by malo zmenit spustenie odosielanie offline fronty z (podporovane iba na vybratych zariadeniach)
+            //FTCLOSE -> FTDOCINFO (predpoklada za vyriesenie problemu pri chybe vycitania UID/OKP)
+
+        finally
+          sl.Free;
+        end;
+      end;
+
+    finally
+      InternalClose();
+    end;
+  end;
+
+  isEkasaInit := (cashRoundSupport = 0) or (cashRoundSupport = 1);
+  if isEkasaInit then result := 0;
+end;
+
+function eKasaFiskalProInit: boolean;
+begin
+  if not isEkasaInit then begin
+    init_eKasaFiskalPro;
+  end;
+  result := isEkasaInit;
+end;
+
+function eKasaStatus(id: integer): string;
+begin
+  result := 'neznámy status';
+  case id of
+    -1: result := rs_ekasa_s_1;
+    0: result := rs_ekasa_s_0;
+    2: result := rs_ekasa_s_2;
+    3: result := rs_ekasa_s_3;
+    4: result := rs_ekasa_s_4;
+    5: result := rs_ekasa_s_5;
+    6: result := rs_ekasa_s_6;
+    7: result := rs_ekasa_s_7;
+    8: result := rs_ekasa_s_8;
+    9: result := rs_ekasa_s_9;
+    10: result := rs_ekasa_s_10;
+  end;
+end;
+
+function errorStr(errCode: integer): string;
+var
+  err: integer;
+begin
+  result := '';
+  init_buffer_str;
+  err := fFiskalPro._Errortext(errCode,@buffer_str);
+  if (err = C_RCODE_6) then
+    result:= get_buffer_str()
+  else
+    result:= IntToStr(errCode);
+end;
+
+function getFiskalProDateTime(sDateTime: string): string;
+begin
+  result := Copy(sDateTime,1,4) + Copy(sDateTime,6,2) + Copy(sDateTime,9,2) + //YYYYMMDD
+            Copy(SDateTime,12,2) + Copy(sDateTime,15,2); //hhnn
+end;
+
+function getFiskalProDate(sDateTime: string): string;
+begin
+  result := Copy(sDateTime,1,4) + Copy(sDateTime,6,2) + Copy(sDateTime,9,2); //YYYYMMDD
+end;
+
+function internalGetUIDorOKP(): string;
+var
+  err: integer;
+  sl: TStringList;
+begin
+  result := 'Error read uid or okp';
+  sl := TStringList.Create;
+  try
+    init_buffer_str();
+    err := fFiskalPro.FTDOCINFO(@buffer_str);
+    if err <> C_RCODE_6 then exit;
+
+    sl.LineBreak := #$A;
+    sl.Text := get_buffer_str();
+    repeat
+      sl.Add(''); //pri OFF-LINE nepride UID zo systemu eKasa
+    until (sl.Count >= 6);
+    result := sl.Strings[C_UID_IDX];
+    if (result = '') then result := sl.Strings[C_OKP_IDX];
+  finally
+    sl.Free;
+  end;
+end;
+
+function canCreateReceipt(var msg: string): boolean;
+var
+  err: integer;
+  sl: TStringList;
+
+  function getNoticeToTheOperator(state: integer): string;
+  begin
+    case state of
+      -1: result := 'Nie je aktívny mód EKasy';
+      0:  result := ''; //OK
+      2:  result := 'Certifikát nenájdený';
+      3:  result := 'Identifikaèná údaje nenájdené';
+      4:  result := 'Chyba inicializácie (worm pamä je odpojená)';
+      5:  result := 'Neplatný certifikát alebo neplatné heslo certifikátu';
+      6:  result := 'Blokácia z dôvodu chybného dokladu';
+      7:  result := 'Certifikátu bude konèi platnos (30 dní pred skonèením certifikátu)'; //OK, ale ...
+      8:  result := 'Certifikátu EKasy vypršala platnos';
+      9:  result := 'CHDU dochádza miesto (=>100 000 blokov na chdu)'; //OK, ale ...
+      10: result := 'CHDU je plné (=>1000 bloèkov na chdu) nutná výmena';
+      16: result := 'CHDU error';
+      17: result := 'Nie je nastavené poloha. Pre mód PORTABLE musí být vždy nastavena poloha';
+      else
+        result := '';
+    end;
+  end;
+
+begin
+  sl := TStringList.Create;
+  msg := '';
+  result := false;
+  try
+    init_buffer_str();
+    err := fFiskalPro.FTEKASASTATE(@buffer_str);
+    if err <> C_RCODE_6 then exit;
+
+    sl.Clear;
+    sl.LineBreak := '\';
+    sl.Text := get_buffer_str();
+    result := CharInSet(sl.Strings[0][1],['0','7','9']);
+    msg := getNoticeToTheOperator(StrToIntDef(sl.Strings[0],0));
+    if (result = true) then begin
+      if (msg <> '') then begin
+        msg := 'I' + msg;
+      end;
+    end
+    else begin
+      msg := 'E' + msg;
+      exit;
+    end;
+
+    init_buffer_str();
+    err := fFiskalPro.FRSTAT(@buffer_str);
+    if err <> C_RCODE_6 then exit;
+
+    sl.Clear;
+    sl.LineBreak := #$A;
+    sl.Text := get_buffer_str();
+    result := CharInSet(sl.Strings[3][1],['0']); //0..OK, 1..Paper out
+    if (result = false) then
+      msg := 'EProblém s papierom';
+
+  finally
+    sl.Free;
+  end;
+end;
+
+
+function fiskalProState(): string;
+var
+  sl: TStringList;
+  tax: string;
+  i,err: integer;
+  o: ISuperObject;
+  ds: char;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      init_buffer_str();
+      err := fFiskalPro.FTEKASASTATE(@buffer_str);
+      if (err <> C_RCODE_6) then exit;
+
+      o := SO();
+      sl := TStringList.Create;
+      try
+        sl.Clear;
+        sl.LineBreak := '\';
+        sl.Text := get_buffer_str();
+
+        o.S['arr[]'] := 'Status ekasy';
+        o.S['arr[]'] := '==========';
+        o.S['arr[]'] := 'Stav: ' + eKasaStatus(StrToInt(sl.Strings[0]));
+        o.S['arr[]'] := 'Poèet dní do konca platnosti certifikátu: ' + sl.Strings[1];
+        o.S['arr[]'] := 'Dátum a èas konca platnosti certifikátu: ' + sl.Strings[2];
+        o.S['arr[]'] := 'DIÈ uložené v certifikáte: ' + sl.Strings[3];
+        o.S['arr[]'] := 'Nastevený typ: ' + sl.Strings[4];
+        o.S['arr[]'] := 'Poèet offline dokladov: ' + sl.Strings[5];
+        o.S['arr[]'] := '';
+        o.S['arr[]'] := 'Sadzby DPH:';
+        o.S['arr[]'] := '==============';
+
+        if isClearVats then begin
+          clearVats();
+          init_buffer_str();
+          err := fFiskalPro.FRINFO(@buffer_str);
+          if (err <> C_RCODE_6) then exit;
+
+          sl.Clear;
+          sl.Text := get_buffer_str();
+          for i := Low(TVats) to High(TVats) do begin
+           ds := FormatSettings.DecimalSeparator;
+           FormatSettings.DecimalSeparator := '.';
+           try
+             vats[i] := StrToCurrDef(sl.Strings[i + 5],0);
+           finally
+             FormatSettings.DecimalSeparator := ds;
+           end;
+          end;
+        end;
+
+        for i := Low(vats)  to High(vats) do
+          o.S['arr[]'] := tax + 'Sadzba ' + IntToStr(i)+ ': ' + FormatFloat('0.00',vats[i]) + '%';
+
+        result := o['arr'].AsString;
+      finally
+        sl.Free;
+      end;
+
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> C_RCODE_6) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskaProCopyLast(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      err := fFiskalPro._Receiptcopy();
+      if (err <> C_RCODE_6) then exit;
+
+      result := '{"message":"OK"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> C_RCODE_6) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProReceipt(): string;
+var
+  err,maxFooter: integer;
+  reqObj,item,textItem: ISuperObject;
+  msg,data: string;
+  receiptType,guid,uidOkp: string;
+  totalSum,roundSum: currency;
+  stopTime: cardinal;
+  timeOut,bRefund: boolean;
+  sl: TStringList;
+  i: integer;
+  ds: char;
+  suma,celkom: currency;
+  quantity_3,price_2,deptno,name,unit_name,unit_price: string;
+  s_reg,ref,item_t: string;
+
+  function checkRefund: boolean;
+  var
+    item: ISuperObject;
+  begin
+    result:= false;
+    for item in reqObj['ReceiptData.Items'] do begin
+      if (item.C['Quantity'] < 0) then begin
+        if not(isReturnType(item.S['Custom.Unit'])) then begin
+          result := true;
+          break;
+        end;
+      end
+      else begin
+        result := false;
+        break;
+      end;
+    end;
+  end;
+
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      if not canCreateReceipt(msg) then begin
+        err := -100;
+        exit;
+      end;
+      reqObj := SO(reqData);
+
+      if (reqObj.S['ReceiptData.ReceiptType'] = 'PD') then begin
+        if isClearVats then begin
+          init_buffer_str();
+          err := fFiskalPro.FRINFO(@buffer_str);
+          if (err <> C_RCODE_6) then exit;
+
+          sl := TStringList.Create;
+          try
+            sl.Text := get_buffer_str();
+            for i := Low(TVats) to High(TVats) do begin
+             ds := FormatSettings.DecimalSeparator;
+             FormatSettings.DecimalSeparator := '.';
+             try
+               vats[i] := StrToCurrDef(sl.Strings[i + 5],0);
+             finally
+               FormatSettings.DecimalSeparator := ds;
+             end;
+            end;
+          finally
+            sl.Free;
+          end;
+        end;
+
+        bRefund:= checkRefund;
+        receiptType := IfThen(bRefund,C_RETURN,C_SALES);
+        guid := reqObj.S['Uuid'];
+        err := fFiskalPro.beginReceipt(receiptType, guid, C_IMP_NR);
+        if (err <> C_RCODE_6) then exit;
+
+        //volitelna hlavicka dokladu
+        if not Empty(fSettings.S['ekasa.header']) then begin
+          sl := TStringList.Create;
+          try
+            sl.LineBreak := #$D#$A;
+            sl.Text := fSettings.S['ekasa.header'];
+            for i := 0 to sl.Count - 1 do begin
+              err := fFiskalPro._Header(sl.Strings[i]);
+              if (err <> C_RCODE_6) then exit;
+            end;
+          finally
+            sl.Free;
+          end;
+        end;
+
+        for item in reqObj['ReceiptData.Items'] do begin
+          celkom := item.C['Price'];
+          suma := Zaok(item.C['Custom.PriceUnit'] * item.C['Quantity'],2,0);
+
+          // Celková cena položky s DPH [%10.2f]
+          if bRefund or (item.D['Quantity'] < 0) then
+            price_2 := value_x(celkom,2)
+          else
+            price_2 := value_x(suma,2);
+
+          // Text artiklu [%60s]
+          name := Copy(item.S['Name'], 1, 60);
+          if empty(name) then name := rs_noname;
+          // Množstvo artiklu [%19.3f]
+          quantity_3 := value_x(Abs(item.C['Quantity']),3);
+          // Merné jednotky [%9s]
+          unit_name := Copy(item.S['Custom.Unit'],1,3);
+          // Index DPH [1-5]
+          deptno := get_vatIdx(item.S['VatRate']);
+
+          // SpecialRegulation - priznak, ktory blizsie specifikuje priradenie dane s hodnotou 0
+          s_reg := item.S['SpecialRegulation'];
+          item_t := item.S['ItemType'];
+          ref := item.S['ReferenceReceiptId'];
+
+          // Jednotková cena s DPH
+          unit_price := value_x(Abs(item.C['Custom.PriceUnit']),decPlCount(item.C['Custom.PriceUnit']));
+
+          if (item.S['ItemType'] = 'Z') then begin //zlava
+            err := fFiskalPro._Discount(value_x(Abs(item.C['Price']),2),
+                                        'Z¾ava ',
+                                        get_vatIdx(item.S['VatRate']));
+
+          end
+          else begin
+            err := fFiskalPro._Sale(quantity_3,price_2,deptno,name,unit_name,ref,s_reg,item_t,unit_price);
+          end;
+
+          if (err <> C_RCODE_6) then exit;
+
+          if (item['Custom.freeText'] <> nil) then begin
+            for textItem in item['Custom.freeText'] do begin
+              err := fFiskalPro.FTEXT(PAnsiChar(AnsiString(textItem.AsString)));
+              if err <> C_RCODE_6 then exit;
+            end;
+          end;
+        end;
+
+        data := value_x(reqObj.C['ReceiptData.Amount'],2);
+        err := fFiskalPro.FTOTA(PAnsiChar(StrToAStr(data)));
+        if (err <> C_RCODE_6)  then exit;
+
+        //Zaslanie dokladu mailom
+        if not Empty(reqObj.S['ReceiptData.Custom.Email']) then begin
+          err := fFiskalPro.FTEKASAEMAIL(PAnsiChar(StrToAStr(reqObj.S['ReceiptData.Custom.Email'])));
+          if err <> C_RCODE_6 then exit;
+        end;
+
+        //identifikacia dokladu ako paragonu
+        if (reqObj.B['ReceiptData.Paragon']) then begin
+          // ParagonNumber
+          data := reqObj.S['ReceiptData.ParagonNumber'];
+          err := fFiskalPro.FTEKASADOCNR(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+          // ParagonDate = IssueDate
+          data := reqObj.S['ReceiptData.IssueDate'];
+          err := fFiskalPro.FTEKASADOCDT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //Platby
+        if bRefund then begin
+          if reqObj.C['ReceiptData.Custom.PaymentCard'] <> 0 then begin {storno karta}
+            err := fFiskalPro._Payment(C_PAY_CARD_IDX,value_x(reqObj.C['ReceiptData.Custom.PaymentCard'],2),'');
+            if err <> C_RCODE_6 then exit;
+          end
+          else if reqObj.C['ReceiptData.Custom.PaymentCash'] <> 0 then begin {storno hotovost}
+            roundSum := reqObj.C['ReceiptData.Custom.PaymentCard'] +
+                        reqObj.C['ReceiptData.Custom.PaymentCash'] +
+                        reqObj.C['ReceiptData.Custom.PaymentCheck'] +
+                        reqObj.C['ReceiptData.Custom.PaymentOther'] -
+                        reqObj.C['ReceiptData.Amount'];
+            err := fFiskalpro._Payment(C_PAY_CASH_IDX,
+                                       value_x(reqObj.C['ReceiptData.Custom.PaymentCash']+reqObj.C['ReceiptData.Custom.CashReturn'],2),
+                                       ifThen(cashRoundSupport=1,value_x(roundSum,2),''));
+           if (err <> C_RCODE_6) then exit;
+          end;
+        end
+        else begin
+          if reqObj.C['ReceiptData.Custom.PaymentCard'] <> 0 then begin {karta}
+            err := fFiskalPro._Payment(C_PAY_CARD_IDX,value_x(reqObj.C['ReceiptData.Custom.PaymentCard'],2),'');
+            if (err <> C_RCODE_6) then exit;
+          end;
+          if reqObj.C['ReceiptData.Custom.PaymentCheck'] <> 0 then begin {sek}
+            err := fFiskalPro._Payment(C_PAY_CHECK_IDX,value_x(reqObj.C['ReceiptData.Custom.PaymentCheck'],2),'');
+            if (err <> C_RCODE_6) then exit;
+          end;
+          if reqObj.C['ReceiptData.Custom.PaymentCash'] <> 0 then begin {hotovost}
+            roundSum := reqObj.C['ReceiptData.Custom.PaymentCard'] +
+                        reqObj.C['ReceiptData.Custom.PaymentCash'] +
+                        reqObj.C['ReceiptData.Custom.PaymentCheck'] +
+                        reqObj.C['ReceiptData.Custom.PaymentOther'] -
+                        reqObj.C['ReceiptData.Amount'];
+            err := fFiskalPro._Payment(C_PAY_CASH_IDX,
+                                       value_x(reqObj.C['ReceiptData.Custom.PaymentCash'] + reqObj.C['ReceiptData.Custom.CashReturn'],2),
+                                       ifThen(cashRoundSupport=1,value_x(roundSum,2),''));
+            if (err <> C_RCODE_6) then begin
+              if err = 192 then cashRoundSupport := 0;
+              exit;
+            end;
+            //vydavok hotovosti
+            if (reqObj.C['ReceiptData.Custom.CashReturn'] <> 0) then begin
+              err := fFiskalPro._CashExpense(value_x(reqObj.C['ReceiptData.Custom.CashReturn'],2));
+              if (err <> C_RCODE_6) then exit;
+            end;
+          end;
+
+          //volitelna pata dokladu
+          if not Empty(fSettings.S['ekasa.footer']) then begin
+            sl := TStringList.Create;
+            try
+              sl.LineBreak := #$D#$A;
+              sl.Text := fSettings.S['ekasa.footer'];
+              //moze byt len 9 riadkov
+              if sl.Count > 9 then maxFooter := 8 else maxFooter := sl.Count - 1;
+              for i := 0 to maxFooter do begin
+                err := fFiskalPro._Footer(IntToStr(i+1), sl.Strings[i]);
+                if (err <> C_RCODE_6) then exit;
+              end;
+            finally
+              sl.Free;
+            end;
+          end;
+
+          stopTime:= GetTickCount + (120 * 1000); //opakovanie 120 sekund, alebo do zdarneho konca
+          repeat
+            Sleep(200);
+            err := fFiskalPro.endReceipt();
+            timeOut := (stopTime < GetTickCount);
+          until IntInSet(err,[C_RCODE_6,C_RCODE_17,C_RCODE_18,C_RCODE_192]) or timeOut;
+          if err = 192 then cashRoundSupport := 0;
+
+          if timeOut then begin
+            err := C_ERR_TIMEOUT;
+            exit;
+          end;
+
+          uidOkp := internalGetUIDorOKP();
+
+          if (msg = '') then
+            result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                             '"uid":"%s"}',[uidOkp,uidOkp])
+          else
+            result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                             '"uid":"%s",'+
+                             '"messageAdd":"%s"}',[uidOkp,uidOkp,msg]);
+        end;
+      end;
+
+      if (reqObj.S['ReceiptData.ReceiptType'] = 'VK') then begin
+        receiptType := C_CASH_IN;
+        guid := reqObj.S['Uuid'];
+        err := fFiskalPro.beginReceipt(receiptType, guid, C_IMP_NR);
+        if (err <> C_RCODE_6) then exit;
+
+        //doplnujuce texty
+        if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then begin
+          data := 'Meno: '+reqObj.S['ReceiptData.Custom.Cashier'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+        if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then begin
+          data := 'Úèel: '+reqObj.S['ReceiptData.Custom.Purpose'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //suma dokladu
+        data := value_x(Abs(reqObj.C['ReceiptData.Amount']),2);
+        err := fFiskalPro.FTOTA(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+        //platby
+        err := fFiskalPro._Payment(C_PAY_CASH_IDX,value_x(Abs(reqObj.C['ReceiptData.Amount']),2),'');
+        if err <> C_RCODE_6 then exit;
+
+        err := fFiskalPro.endReceipt();
+        if (err <> C_RCODE_6) then exit;
+
+        uidOkp := internalGetUIDorOKP();
+
+        if (msg = '') then
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s"}',[uidOkp,uidOkp])
+        else
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s",'+
+                           '"messageAdd":"%s"}',[uidOkp,uidOkp,msg]);
+      end;
+
+      if (reqObj.S['ReceiptData.ReceiptType'] = 'VY') then begin
+        receiptType := C_CASH_OUT;
+        guid := reqObj.S['Uuid'];
+        err := fFiskalPro.beginReceipt(receiptType, guid, C_IMP_NR);
+        if (err <> C_RCODE_6) then exit;
+
+        //doplnujuce texty
+        if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then begin
+          data := 'Meno: '+reqObj.S['ReceiptData.Custom.Cashier'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+        if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then begin
+          data := 'Úèel: '+reqObj.S['ReceiptData.Custom.Purpose'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //suma dokladu
+        data := value_x(Abs(reqObj.C['ReceiptData.Amount']),2);
+        err := fFiskalPro.FTOTA(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+        //platby
+        err := fFiskalPro._Payment(C_PAY_CASH_IDX,value_x(Abs(reqObj.C['ReceiptData.Amount']),2),'');
+        if err <> C_RCODE_6 then exit;
+
+        err := fFiskalPro.endReceipt();
+        if (err <> C_RCODE_6) then exit;
+
+        uidOkp := internalGetUIDorOKP();
+
+        if (msg = '') then
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s"}',[uidOkp,uidOkp])
+        else
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s",'+
+                           '"messageAdd":"%s"}',[uidOkp,uidOkp,msg]);
+      end;
+
+      if (reqObj.S['ReceiptData.ReceiptType'] = 'UF') then begin
+        if not canCreateReceipt(msg) then begin
+          err := -100;
+          exit;
+        end;
+        //Povinne statusove prikazy - potrebne pouzivat pred kazdym dokladom
+        receiptType := IfThen(reqObj.C['ReceiptData.Amount']>0,C_INVOICE,C_INVOICE_CANCEL);
+
+        err := fFiskalPro.FTUID(PAnsiChar(AnsiString(reqObj.S['Uuid'])));
+        if (err <> C_RCODE_6) then exit;
+
+        data := reqObj.S['ReceiptData.InvoiceNumber'];
+        if Empty(data) then data := rs_nezadane;
+        err := fFiskalPro.FTREFNR(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+
+        err := fFiskalPro.FTOPEN(PAnsiChar(AnsiString(receiptType)));
+        if (err <> C_RCODE_6) then exit;
+
+        fFiskalPro.FSIMPNR(PAnsiChar(AnsiString(C_IMP_NR)));
+
+        //celkova cena s DPH
+        data := 'A'+value_x(Abs(reqObj.C['ReceiptData.Amount']),2);
+        err := fFiskalPro.FITEM(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+        //text
+        data := IfThen(receiptType='10','TÚhrada faktúry','TStorno úhrady faktúry');
+        err := fFiskalPro.FITEM(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+        //index DPH
+        data := 'V'+'5'; //TODO - zistit index danovej sadzby
+        err := fFiskalPro.FITEM(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+        // FTEXT
+        data := reqObj.S['ReceiptData.InvoiceNumber'];
+        if Empty(data) then data := rs_nezadane;
+        err := fFiskalPro.FTEXT(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+
+        //suma dokladu
+        data := value_x(Abs(reqObj.C['ReceiptData.Amount']),2);
+        err := fFiskalPro.FTOTA(PAnsiChar(AnsiString(data)));
+        if (err <> C_RCODE_6) then exit;
+
+        //DOPLNUJUCE TEXTY
+        if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then begin
+          data := 'Meno: '+reqObj.S['ReceiptData.Custom.Cashier'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+        if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then begin
+          data := 'Úèel: '+reqObj.S['ReceiptData.Custom.Purpose'];
+          err := fFiskalPro.FTEXT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //Zaslanie dokladu mailom
+        if not Empty(reqObj.S['ReceiptData.Custom.Email']) then begin
+          err := fFiskalPro.FTEKASAEMAIL(PAnsiChar(StrToAStr(reqObj.S['ReceiptData.Custom.Email'])));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //identifikacia dokladu ako paragonu
+        if (reqObj.B['ReceiptData.Paragon']) then begin
+          // ParagonNumber
+          data := reqObj.S['ReceiptData.ParagonNumber'];
+          err := fFiskalPro.FTEKASADOCNR(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+          // ParagonDate = IssueDate
+          data := reqObj.S['ReceiptData.IssueDate'];
+          err := fFiskalPro.FTEKASADOCDT(PAnsiChar(StrToAStr(data)));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        //Platby
+        if (reqObj.C['ReceiptData.Custom.PaymentCard'] <> 0) then begin //kartou
+          err := fFiskalPro._Payment(C_PAY_CARD_IDX,
+                                     value_x(Abs(reqObj.C['ReceiptData.Custom.PaymentCard']),2),
+                                     '');
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        if (reqObj.C['ReceiptData.Custom.PaymentCash'] <> 0) then begin  //hotovost
+          totalSum := reqObj.C['ReceiptData.Amount'];
+          roundSum := reqObj.C['ReceiptData.Custom.PaymentCard'] +
+                      reqObj.C['ReceiptData.Custom.PaymentCash'] -
+                      reqObj.C['ReceiptData.Amount'];
+          if (cashRoundSupport = 1) then totalSum := totalSum + roundSum;
+          err := fFiskalPro._Payment(C_PAY_CASH_IDX,
+                                     value_x(Abs(totalSum),2),
+                                     ifThen((cashRoundSupport=1),value_x(roundSum,2),''));
+          if (err <> C_RCODE_6) then exit;
+        end;
+
+        stopTime:= GetTickCount + (120 * 1000); //opakovanie 120 sekund, alebo do zdarneho konca
+        repeat
+          Sleep(200);
+          err := fFiskalPro.endReceipt();
+          timeOut := (stopTime < GetTickCount);
+        until intInSet(err,[C_RCODE_6,C_RCODE_17,C_RCODE_18]) or timeOut;
+
+        if timeOut then begin
+          err := C_ERR_TIMEOUT;
+          exit;
+        end;
+
+        uidOkp := internalGetUIDorOKP();
+
+        if (msg = '') then
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s"}',[uidOkp,uidOkp])
+        else
+          result := Format('{"message":"Doklad UID:%s úspešne zaevidovaný a odoslaný do tlaèiarne.",'+
+                           '"uid":"%s",'+
+                           '"messageAdd":"%s"}',[uidOkp,uidOkp,msg]);
+
+        if fSettings.B['ekasa.copyInvoice'] then err := fFiskalPro._Receiptcopy();
+
+      end;
+
+    end
+    else
+      result := rs_connection_error;
+  finally
+    if not intInSet(err,[C_RCODE_6,C_RCODE_17]) then begin
+      if (err = -100) then
+        result := Format('{"errorCode":500,"error":"%s"}',[msg])
+      else
+        result := Format('{"errorCode":500,"error":"%s"}',[errorStr(err)]);
+    end;
+    internalClose();
+  end;
+
+end;
+
+function fiskalProLocationGps(): string;
+var
+  err: integer;
+  data: string;
+  reqObj: ISuperObject;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      reqObj := SO(reqData);
+      data := '1\' + reqObj.S['Gps.AxisX'] + '\' + reqObj.S['Gps.AxisY'];
+      err := fFiskalPro.FSGPS(PAnsiChar(AnsiString(data)));
+      if (err <> C_RCODE_6) then exit;
+
+      result := '{"message":"Poloha úspešne zaevidovaná"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> C_RCODE_6) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProLocationAddress(): string;
+var
+  err: integer;
+  data: string;
+  reqObj: ISuperObject;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      reqObj := SO(reqData);
+      data := '2\' + reqObj.S['PhysicalAddress.StreetName'] + '\' +
+        reqObj.S['PhysicalAddress.PropertyRegistrationNumber'] + '\' +
+        reqObj.S['PhysicalAddress.PostalCode'] + '\' +
+        reqObj.S['PhysicalAddress.Municipality'] + '\' +
+        reqObj.S['PhysicalAddress.BuildingNumber'];
+      err := fFiskalPro.FSGPS(PAnsiChar(AnsiString(data)));
+      if err <> C_RCODE_6 then exit;
+
+      result := '{"message":"Poloha úspešne zaevidovaná"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if err <> C_RCODE_6 then result := Format('{"errorCode":500,"error":"%s"}',[errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProLocationOther(): string;
+var
+  err: integer;
+  data: string;
+  reqObj: ISuperObject;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      reqObj := SO(reqData);
+      data := '3\' + reqObj.S['Other'];
+      err := fFiskalPro.FSGPS(PAnsiChar(AnsiString(data)));
+      if err <> C_RCODE_6 then exit;
+
+      result := '{"message":"Poloha úspešne zaevidovaná"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if err <> C_RCODE_6 then result := Format('{"errorCode":500,"error":"%s"}',[errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProReport(): string;
+var
+  err: integer;
+  msg,report: string;
+  startPoint,endPoint,reporttype: string;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      if not canCreateReceipt(msg) then begin
+         err := -100;
+         exit;
+      end;
+      report := paramByName('type',reqParams);
+      //Povinne statusove prikazy - potrebne pouzivat pred kazdym dokladom
+      if (Lowercase(report) = '') then begin
+        report := paramByName('datetimefrom',reqParams);
+        startPoint := getFiskalProDate(report);
+        report := paramByName('datetimeto',reqParams);
+        endPoint := getFiskalProDate(report);
+        reporttype := 'I';
+        err := fFiskalPro._Report(reporttype,startPoint,endPoint);
+        if (err <> C_RCODE_6) then exit;
+      end
+      else if (Lowercase(report) = 'zreport') then begin
+        err := fFiskalPro._ZReport;
+        if (err <> C_RCODE_6) then exit;
+      end
+      else if (Lowercase(report) = 'xreport') then begin
+        err:= fFiskalPro._XReport;
+        if (err <> C_RCODE_6) then exit;
+      end
+      else begin
+        result := '{"errorCode":500,"error":"unsupported request"}';
+        exit;
+      end;
+
+      if (msg = '') then
+        result := '{"message":"OK"}'
+      else
+        result := Format('{"message":"OK","messageAdd":"%s"}',[msg]);
+    end
+    else
+     result := rs_connection_error;
+
+  finally
+    if (err <> C_RCODE_6) then begin
+      if (err = -100) then
+        result := Format('{"errorCode":500,"error":"%s"}',[msg])
+      else
+        result := Format('{"errorCode":500,"error":"%s"}',[errorStr(err)]);
+    end;
+    internalClose();
+  end;
+end;
+
+function fiskalProUnsent(): string;  //tlac
+var
+  err: integer;
+  data: string;
+
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      data := getFiskalProDateTime(paramByName('datetimefrom',reqParams)) + '\';
+      data := data + getFiskalProDateTime(paramByName('datetimeto',reqParams)) + '\';
+      data := data + paramByName('numberfrom',reqParams) + '\';
+      data := data + paramByName('numberto',reqParams);
+      err := fFiskalPro.FXEKASAPRNERR(PAnsiChar(AnsiString(data)));
+      if err <> C_RCODE_6 then exit;
+
+      result := '{"message":"OK"}';
+    end
+    else
+     result := rs_connection_error;
+
+  finally
+    if err <> C_RCODE_6 then result := Format('{"errorCode":500,"error":"%s"}',[errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProSendunsent(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      err := fFiskalPro.FSEKASASEND();
+      if err <> C_RCODE_6 then exit;
+
+      result := '{"message":"Odosielanie neodoslaných dátových správ na server eKASA FS spustené"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> C_RCODE_6) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function fiskalProPrncdkick(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_RCODE_6;
+  internalInit();
+  try
+    if (fiskalProOpen) then begin
+      err := fFiskalPro.FTSIGNAL(PAnsiChar(AnsiString('2')));
+      if (err <> C_RCODE_6) then exit;
+
+      result := '{"message":"OK"}';
+    end
+    else
+      result := rs_connection_error;
+  finally
+    if (err <> C_RCODE_6) then  result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function eKasaFiskalProWork(action: TEkasaActions): string;
+begin
+  result := '';
+  case action of
+    actState: result := fiskalProState;
+    actSettingsGet: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSettingsPost: result := '{"errorCode":500,"error":"unsupported request"}';
+    actCopyLast: result := fiskaProCopyLast;
+    actCopyByUuid: result := '{"errorCode":500,"error":"unsupported request"}';
+    actCopyById: result := '{"errorCode":500,"error":"unsupported request"}';
+    actReceipt: result := fiskalProReceipt;
+    actReceiptStateId: result := '{"errorCode":500,"error":"unsupported request"}';
+    actLocationGps: result := fiskalProLocationGps;
+    actLocationAddress: result := fiskalProLocationAddress;
+    actLocationOther: result := fiskalProLocationOther;
+    actReport: result := fiskalProReport;
+    actUnsent: result := fiskalProUnsent;
+    actSendunsent: result := fiskalProSendunsent;
+    actPrncdkick: result := fiskalProPrncdkick;
+    actPrnfreeprint: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSenderror: result := '{"errorCode":500,"error":"unsupported request"}';
+    actExamplereceipt: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSelectpayments: result := '{"errorCode":500,"error":"unsupported request"}';
+  end;
+end;
+
+initialization
+  clearVats();
+
+end.

@@ -1,0 +1,993 @@
+unit eKasaVarosNative;
+
+interface
+
+uses
+  Controls, Forms, DelUp, Varos, uEkasaPrinters;
+
+const
+  rs_connection_error = '{"errorCode":500,"error":"Nepodarilo sa spojenie s Varos. Skontrolujte ju!"}';
+
+resourcestring
+  receipt_header = 'N·zov tovaru'+#$D#$A+'Mnoûstvo  MJ  cena/MJ   DPH  cena celkom';
+
+type
+  TVats = array[1..5] of currency;
+  Tbuffer_str = array [0..Varos.C_LEN_BUFF -1] of AnsiChar;
+  TInfoFile = record
+    stav: integer;
+    uid: string;
+    okp: string;
+  end;
+
+  procedure internalInit();
+  procedure internalClose();
+
+  function eKasaVarosNativeInit: boolean;
+  function eKasaVarosNativeWork(action: TEkasaActions): string;
+
+var
+  vats: TVats;
+  varosOpen: boolean = false;
+  buffer_str: Tbuffer_str;
+  cashRoundSupport: integer = -1; //-1 nebolo zistene, 0 nepodporovane, 1 podporovane
+
+implementation
+
+uses
+  Classes, FiskalPro, SysUtils, StrUtils, payPackageUtils, uCommon, superObject,
+  uEkasaHelper, Windows, uSettings, Math;
+
+
+procedure init_buffer_str;
+var
+  i: integer;
+begin
+  for i:= Low(Tbuffer_str) to High(Tbuffer_str) do
+    buffer_str[i]:= #0;
+end;
+
+procedure set_buffer_str(value: string);
+var
+  i: integer;
+begin
+  init_buffer_str;
+  for i:= 1 to Length(value) do
+    buffer_str[i-1]:= CharToAnsiChar(value[i]);
+end;
+
+function get_buffer_str(dlzka: integer = 0): string;
+begin
+  result := AStrToStr(StrPas(PAnsiChar(@buffer_str)));
+  if dlzka > 0 then
+    result:= LeftStr(result, dlzka);
+end;
+
+procedure clearVats();
+var
+  i: integer;
+begin
+  for i := Low(TVats) to High(TVats) do
+    vats[i] := -1;
+end;
+
+function isClearVats(): boolean;
+var
+  i: integer;
+begin
+  result := true;
+  for i := Low(TVats) to High(TVats) do
+    if vats[i] >= 0 then begin
+      result := false;
+      break;
+    end;
+end;
+
+function errorStr(errCode: integer): string;
+begin
+  result := fVaros.errorStr(errCode);
+end;
+
+function getVarosNativeDateTime(sDateTime: string): string;
+begin
+  result := Copy(sDateTime,1,4) + Copy(sDateTime,6,2) + Copy(sDateTime,9,2) + //YYYYMMDD
+            Copy(SDateTime,12,2) + Copy(sDateTime,15,2) + Copy(sDateTime,18,2); //hhnnss
+end;
+
+function init_eKasaVarosNative: integer;
+var
+  res: integer;
+  str: string;
+  ver: integer;
+begin
+  result := -1;
+  isEkasaInit := false;
+
+  if not CheckInstalledPackage(pckgVaros,true) then exit;
+
+  if (cashRoundSupport = -1) then begin
+    internalInit();
+    if varosOpen then begin
+      try
+        cashRoundSupport := 0;
+        init_buffer_str();
+        res := fVaros.STATE_v_x76(buffer_str);
+        if (res = C_OK) then begin
+          str := get_buffer_str;
+          str := TrimLeadZero(str);
+          ver := StrToInt(str);
+          if (ver >= 2100) then //TM5000WIN - 2100
+            cashRoundSupport := 1
+          else if (ver >= 200) then //TM5000 or FT5000 with direct TCP - 0200
+            cashRoundSupport := 1;
+        end;
+      finally
+        internalClose();
+      end;
+    end;
+  end;
+
+  isEkasaInit := (cashRoundSupport = 0) or (cashRoundSupport = 1);
+  if isEkasaInit then result := 0;
+end;
+
+procedure internalInit();
+var
+  err: integer;
+begin
+  err := C_OK;
+  if not varosOpen then begin
+    case fSettings.I['ekasa.connectionTyp'] of
+      ord(connectionRS232),ord(connectionUSB): err := fVaros._ConnectCom(fSettings.I['ekasa.comPort']); //COM/USB
+      ord(connectionTCP): err := fVaros._ConnectTcp(fSettings.S['ekasa.hostAddress']); //TCP
+    end;
+    if (err <> C_OK) then exit;
+    varosOpen := true;
+  end;
+end;
+
+procedure internalClose();
+begin
+  if (varosOpen = false) then exit;
+  try
+    case fSettings.I['ekasa.connectionTyp'] of
+      ord(connectionRS232),ord(connectionUSB): fvaros._DisconectCom();
+      ord(connectionTCP): fVaros._DisconnectTcp();
+    end;
+  finally
+    varosOpen := false;
+  end;
+end;
+
+function getVarosNativeDate(sDateTime: string): string;
+begin
+  result := Copy(sDateTime,1,4) + Copy(sDateTime,6,2) + Copy(sDateTime,9,2); //YYYYMMDD
+end;
+
+function getInfoFile(out infoFile: TInfoFile): integer;
+var
+  recvWait: integer;
+  str: string;
+  o: ISuperObject;
+  stopTime: cardinal;
+begin
+  recvWait := -1;
+  stopTime := GetTickCount + 20000;
+  repeat
+    internalClose();
+    internalInit();
+    init_buffer_str();
+    result := fVaros.STATE_I_x49(buffer_str);
+    if (result = C_OK) then begin
+      str := get_buffer_str;
+      o := SO(str);
+      InfoFile.stav := o.I['errCode'];
+      InfoFile.uid := o.S['uid'];
+      InfoFile.okp := o.S['okp'];
+      recvWait := result;
+    end;
+
+    if (recvWait < 0) and (stopTime < GetTickCount) then
+      recvWait := C_ERR_TIMEOUT; // timeOut odchod z tadeto
+
+  until (recvWait >= 0);
+
+  result := recvWait;
+end;
+
+function getReference(info: TInfoFile): string;
+begin
+  result := ifThen(info.uid='OFFLINE',info.okp,info.uid);
+end;
+
+function totalTaxId(tax,count: currency; m_unit,tax0: string; discount: boolean): string;
+var
+  tax_level: byte;
+
+  function taxLevel(tax: currency): byte;
+  var
+    i: integer;
+  begin
+    result := 1;
+    for i := Low(TVats) to High(TVats) do
+      if tax = vats[i] then begin
+        result := i;
+        break;
+      end;
+  end;
+
+begin
+  tax_level := taxLevel(tax);
+
+  if count > 0 then begin //kladne danove hladiny
+    if (isReturnType(m_unit)) then
+      result := '7'
+    else begin
+      case tax_level of
+        1: result := '1';
+        2: result := '2';
+        3: result := '3NN' + tax0;
+      end;
+    end;
+  end
+  else begin //zaporne danove hladiny
+    if (isReturnType(m_unit)) then
+      result := '8A'
+    else begin
+      case tax_level of
+        1: result := '4';
+        2: result := '5';
+        3: result := '6';
+      end;
+      if (discount) then begin
+        result := result + 'BN';
+        if (tax_level = 3) then result := result + tax0;
+      end
+      else if (m_unit = '_OZ') then begin
+        result := result + 'CN';
+        if (tax_level = 3) then result := result + tax0;
+      end
+      else if (m_unit = '_VP') then begin
+        result := result + 'DN';
+        if (tax_level = 3) then result := result + tax0;
+      end
+      else begin
+        result := result + 'AN';
+        if (tax_level = 3) then result := result + tax0;
+      end;
+    end;
+  end;
+  result := ESC + LeftStr(result+StringOfChar('N',3),4);
+end;
+
+function get_vatVal(vatRate: string): currency;
+begin
+  vatRate := ReplaceStr(vatRate,'%','');
+  vatRate := ReplaceStr(vatRate,'OOD','');
+  vatRate := ReplaceStr(vatRate,'PDP','');
+  vatRate := ReplaceStr(vatRate,'CK','');
+  vatRate := ReplaceStr(vatRate,'PT','');
+  vatRate := ReplaceStr(vatRate,'UD','');
+  vatRate := ReplaceStr(vatRate,'ZPS','');
+  vatRate := ReplaceStr(vatRate,'INE','');
+  result := StrToCurrDef(vatRate,0);
+end;
+
+function get_vat0Id(vatRate: string): string;
+begin
+  result := 'N';
+  if (vatRate = 'OOD') then result := 'N'       //osloboden· od dane
+  else if (vatRate = 'PDP') then result := 'P'  //prenesenie daÚovej povinnosti
+  else if (vatRate = 'CK') then result := 'K'   //cestovnÈ kancel·rie
+  else if (vatRate = 'PT') then result := 'T'   //pouûit˝ tovar
+  else if (vatRate = 'UD') then result := 'U'   //umeleckÈ diela
+  else if (vatRate = 'ZPS') then result := 'Z'; //zberateæskÈ predmety a staroûitnosti
+end;
+
+function eKasaVarosNativeInit: boolean;
+begin
+  if not isEkasaInit then begin
+    init_eKasaVarosNative;
+  end;
+  result := isEkasaInit;
+end;
+
+function varosNativeState(): string;
+var
+  str: string;
+  err: integer;
+  o,oo: ISuperObject;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      init_buffer_str();
+      err := fVaros.STATE_s_x73(buffer_str); // vycitanie informacii o CHDU (JSON format)
+      if (err <> 0) then exit;
+
+      o := SO();
+      str := get_buffer_str();
+      oo := SO(str);
+      o.S['arr[]'] := 'VAROS eKasa';
+      o.S['arr[]'] := '=========================================';
+      o.S['arr[]'] := 'n·zov CHD⁄: ' + oo.S['name'];
+      o.S['arr[]'] := 'pripravenosù tlaËiarne: ' + oo.S['printerReady'];
+      o.S['arr[]'] := 'sÈriovÈ ËÌslo CHD⁄: ' + oo.S['serialNumber'];
+      o.S['arr[]'] := 'celkov· veækosù pam‰te CHD⁄: ' + oo.S['spaceTotal'];
+      o.S['arr[]'] := 'voæn· veækosù pam‰te CHD⁄: ' + oo.S['spaceFree'];
+      o.S['arr[]'] := 'verzia CHD⁄: ' + oo.S['version'];
+      o.S['arr[]'] := 'typ CHD⁄: ' + oo.S['type'];
+      o.S['arr[]'] := 'ËÌslo poslednÈho dokladu: ' + oo.S['lastReceipt'];
+      o.S['arr[]'] := 'd·tum poslednÈho dokladu: ' + oo.S['lastProcDate'];
+      o.S['arr[]'] := 'platnosù certifik·tu: ' + oo.S['certifValid'];
+      o.S['arr[]'] := 'poËet chybn˝ch dokladov: ' + oo.S['errorReceipt'];
+      o.S['arr[]'] := 'poËet neodoslan˝ch dokladov: ' + oo.S['offlineCount'];
+      o.S['arr[]'] := 'typ procesora v CHD⁄: ' + oo.S['procType'];
+      o.S['arr[]'] := '';
+      init_buffer_str();
+      err := fVaros.STATE_p_x70(buffer_str);
+      if (err <> 0) then exit;
+      str := get_buffer_str();
+      oo := SO(str);
+      o.S['arr[]'] := 'VAROS printer';
+      o.S['arr[]'] := '========================';
+      o.S['arr[]'] := 're·lny stav tlaËiarne: ' + oo.S['name'];
+      o.S['arr[]'] := 'tlaËiarne je zanepr·zdnen·: ' + oo.S['printerBusy'];
+      o.S['arr[]'] := 'chyba naËÌtania stavu: ' + oo.S['readTimeout'];
+      o.S['arr[]'] := 'printerStatus:';
+      o.S['arr[]'] := '   stav spÌnaËa z·suvky: ' + oo.S['printerStatus.drawerPin'];
+      o.S['arr[]'] := '   online stav tlaËiarne: ' + oo.S['printerStatus.online'];
+      o.S['arr[]'] := '   Ëakanie na opravu: ' + oo.S['printerStatus.waitForRecowery'];
+      o.S['arr[]'] := '   posun papiera: ' + oo.S['printerStatus.paperFeed'];
+      o.S['arr[]'] := 'offlineStatus:';
+      o.S['arr[]'] := '   otvoren˝ kryt tlaËiarne: ' + oo.S['offlineStatus.coverOpen'];
+      o.S['arr[]'] := '   posun papiera: ' + oo.S['offlineStatus.paperFeed'];
+      o.S['arr[]'] := '   koniec papiera: ' + oo.S['offlineStatus.paperEnd'];
+      o.S['arr[]'] := '   chyba tlaËiarne: ' + oo.S['offlineStatus.error'];
+      o.S['arr[]'] := 'errorStatus:';
+      o.S['arr[]'] := '   odstr·niteæn· chyba: ' + oo.S['errorStatus.recoverable'];
+      o.S['arr[]'] := '   chyba rezaËa: ' + oo.S['errorStatus.autocutter'];
+      o.S['arr[]'] := '   neodstr·niteæn· chyba: ' + oo.S['errorStatus.unrecoverable'];
+      o.S['arr[]'] := '   odstr·niteæn· chyba: ' + oo.S['errorStatus.autorecoverable'];
+      o.S['arr[]'] := 'sensorStatus:';
+      o.S['arr[]'] := '   blÌûi sa koniec papiera: ' + oo.S['sensorStatus.paperNearEnd'];
+      o.S['arr[]'] := '   chyba: ' + oo.S['sensorStatus.paperError'];
+
+      result := o['arr'].AsString;
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeCopyLast(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      err := fVaros._Receiptcopy();
+      if (err <> 0) then exit;
+
+      result := '{"message":"OK"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeRecipt(): string;
+var
+  i,err: integer;
+  sl: TStringList;
+  reqObj: ISuperObject;
+  info: TInfoFile;
+  s,uidOkp,paragonNumber: string;
+  totalSum,roundSum,cena_mj,suma: currency;
+  bRefund: boolean;
+  item,textItem: ISuperObject;
+  three_nnx: string;
+
+  function checkRefund: boolean;
+  var
+    item: ISuperObject;
+  begin
+    result:= false;
+    for item in reqObj['ReceiptData.Items'] do begin
+      if (item.C['Quantity'] < 0) then begin
+        if not(isReturnType(item.S['Custom.Unit'])) then begin
+          result := true;
+          break;
+        end;
+      end
+      else begin
+        result := false;
+        break;
+      end;
+    end;
+  end;
+
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      sl := TStringList.Create;
+      reqObj := SO(reqData);
+      try
+        sl.Clear;
+
+        if (reqObj.S['ReceiptData.ReceiptType'] = 'PD') then begin
+
+          if isClearVats then begin
+            init_buffer_str();
+            err := fVaros.STATE_d_x64(buffer_str);
+            if (err <> C_OK) then exit;
+
+            sl.LineBreak := #$D#$A;
+            sl.Text  := get_buffer_str();
+            for i := 0 to Min(4, sl.Count - 1) do
+              vats[i + 1]:= StrToCurrDef(sl[i], -1);
+          end;
+
+          bRefund := checkRefund();
+          s := ESC+'b';
+          s := s + IfThen((reqObj.S['ReceiptData.Custom.Email'] = ''),'^t','^e'+reqObj.S['ReceiptData.Custom.Email']+'^k');
+          if (reqObj.B['ReceiptData.Paragon']) then begin
+            //cislo paragonu je nutne doplnit na dlzku 5 znakov zlava nulami
+            paragonNumber := RightStr(StringOfChar('0', 5)+reqObj.S['ReceiptData.ParagonNumber'], 5);
+            s  := s+'^P'+getVarosNativeDateTime(reqObj.S['ReceiptData.IssueDate'])+paragonNumber+'^k';
+          end;
+
+          //volitelna hlavicka dokladu
+          if not Empty(fSettings.S['ekasa.header']) then begin
+            sl.Add(s+fSettings.S['ekasa.header']);
+            s := '';
+          end;
+
+          sl.Add(s+receipt_header);
+          sl.Add(StringOfChar('=',40));
+
+          for item in reqObj['ReceiptData.Items'] do begin
+
+            if (item.S['ItemType'] = 'Z') then begin //zlava
+              //mnozstvo
+              s := '^Q'+'1'+'^k'+' x ';
+              s := s+'^D'+addSpacesR(item.S['Name'],12)+'^k';
+              s := s+'v DPH '+totalTaxId(get_vatVal(item.S['VatRate']),
+                                         -1,
+                                         item.s['Custom.Unit'],
+                                         get_vat0Id(item.S['VatRate']),
+                                         true) +
+                   addSpacesL(value_x(item.C[''],2) ,10)+ ' EUR';
+              sl.Add(s);
+            end
+            else begin
+              sl.Add('^B^D'+item.S['Name']+'^k^N');
+
+              // mnozstvo
+              s := '^Q'+addSpacesL(value_x(Abs(item.C['Quantity']),
+                                   decPlCount(item.C['Quantity'])),8)+'^k';
+
+              // merna jednotka
+              s := s+addSpacesR(item.S['Custom.Unit'],3)+' x ';
+
+              // jednotkova cena
+              cena_mj := item.C['Custom.PriceUnit'];
+              s := s+'^J'+addSpacesR(value_x(cena_mj,2),8)+'^k';
+
+              // unikatny identifikator dokladu
+              if (item.C['Quantity'] < 0) then
+                if not isReturnType(item.S['Custom.Unit']) then
+                  s := s+'^R'+item.S['ReferenceReceiptId']+'^k';
+
+              // identifikacia predavajuceho v ktoreho mene bol predany tovar, alebo poskytnuta sluzba
+              if not Empty(item.S['SellerId']) then
+                s := s + '^S'+item.S['SellerIdType']+item.S['SellerId']+'^k';
+
+              //celkova suma
+              suma := item.C['Price'];
+
+              // celkom v sadzbe
+              three_nnx := totalTaxId(get_vatVal(item.S['VatRate']),
+                                      item.C['Quantity'],
+                                      item.S['Custom.Unit'],
+                                      get_vat0Id(item.S['VatRate']),
+                                      false);
+              s := s + three_nnx + addSpacesL(value_x(suma,2),10) + ' EUR';
+              sl.Add(s);
+
+              if (item['Custom.freeText'] <> nil) then begin
+                for textItem in item['Custom.freeText'] do
+                  sl.Add(textItem.AsString);
+              end;
+            end;
+          end;
+
+          totalSum := reqObj.C['ReceiptData.Amount'];
+          roundSum := reqObj.C['ReceiptData.Custom.PaymentCard'] +
+                      reqObj.C['ReceiptData.Custom.PaymentCash'] +
+                      reqObj.C['ReceiptData.Custom.PaymentCheck'] +
+                      reqObj.C['ReceiptData.Custom.PaymentOther'] -
+                      reqObj.C['ReceiptData.Amount'];
+
+          if (cashRoundSupport = 1) then begin
+            //zaokruhlenie hotovosti sa posiela ako polozka dokladu
+            if (roundSum <> 0) then begin
+              s := '^B^DZaokr˙hlenie^k^N   ^Q1^k^Mx ^k    ';
+              if (roundSum > 0) then
+                s := s + ESC + '3NNC' //kladne zaokruhlenie - 3NNC
+              else
+                s := s + ESC + '6ANC'; //zaporne zaokruhlenie - 6ANC
+              s := s + addSpacesL(value_x(roundSum,2), 10)+' EUR';
+              sl.Add(s);
+            end;
+          end;
+
+          //konecna suma
+          sl.Add(ESC+'k'+ifThen(cashRoundSupport = 1,
+                                value_x(totalSum+roundSum,2),
+                                value_x(totalSum,2)));
+
+          //platidla
+          if (reqObj.C['ReceiptData.Custom.PaymentCash'] <> 0) then
+            sl.Add(ESC+'P1'+value_x(reqObj.C['ReceiptData.Custom.PaymentCash'],2));
+          if (reqObj.C['ReceiptData.Custom.PaymentCard'] <> 0) then
+            sl.Add(ESC+'P2'+value_x(reqObj.C['ReceiptData.Custom.PaymentCard'],2));
+          if (reqObj.C['ReceiptData.Custom.PaymentCheck'] <> 0) then
+            sl.Add(ESC+'P3'+value_x(reqObj.C['ReceiptData.Custom.PaymentCheck'],2));
+          //vydavok
+          if ((reqObj.C['ReceiptData.Custom.CashReturn'] <> 0) and (bRefund = false)) then begin
+            sl.Add('V˝davok:');
+            sl.Add(ESC+'P1'+value_x(-reqObj.C['ReceiptData.Custom.CashReturn'],2));
+          end;
+          sl.Add('^N'); //???
+
+          //volitelna pata dokladu
+          if not Empty(fSettings.S['ekasa.footer']) then begin
+            sl.Add(s+fSettings.S['ekasa.footer']);
+            s := '';
+          end;
+
+          // koniec dokladu
+          sl.Add(ESC+'e');
+
+          //otvorenie zasuvky
+          sl.Add(ESC+'o');
+
+          err := fVaros._Receipt(sl.Text);
+          if (err <> 0) then exit;
+          err := getInfoFile(info);
+          if (err <> 0) then exit;
+
+          if (info.stav = 1) then begin
+            uidOkp := getReference(info);
+            result := Format('{"message":"Doklad UID:%s ˙speöne zaevidovan˝ a odoslan˝ do tlaËiarne.",'+
+                             '"uid":"%s"}',[uidOkp,uidOkp]);
+          end
+          else
+            err := info.stav;
+        end;
+
+        if (reqObj.S['ReceiptData.ReceiptType'] = 'UF') then begin
+
+          totalSum := reqObj.C['ReceiptData.Amount'];
+          roundSum := reqObj.C['ReceiptData.Custom.PaymentCard'] +
+                      reqObj.C['ReceiptData.Custom.PaymentCash'] -
+                      reqObj.C['ReceiptData.Amount'];
+
+          s := ESC+'B';
+          s := s + IfThen((reqObj.S['ReceiptData.Custom.Email'] = ''),'^t','^e'+reqObj.S['ReceiptData.Custom.Email']+'^k');
+          if (reqObj.B['ReceiptData.Paragon']) then begin
+            //cislo paragonu je nutne doplnit na dlzku 5 znakov zlava nulami
+            paragonNumber := RightStr(StringOfChar('0', 5)+reqObj.S['ReceiptData.ParagonNumber'],5);
+            s  := s+'^P'+getVarosNativeDateTime(reqObj.S['ReceiptData.IssueDate'])+paragonNumber+'^k';
+          end;
+          s := s + StringOfChar(' ',40);
+          sl.Add(s);
+
+          sl.Add('^B'+'Potvrdenie k hotovostnej ˙hrade fakt˙ry'+'^N');
+
+          sl.Add('^I'+reqObj.S['ReceiptData.InvoiceNumber']+'^k');
+          if (totalSum > 0) then
+            sl.Add(RightStr(StringOfChar(' ',36)+ESC+'0NNN'+value_x(totalSum,2)+' EUR', 40))
+          else
+            sl.Add(RightStr(StringOfChar(' ',36)+ESC+'9ANN'+value_x(totalSum,2)+' EUR', 40));
+
+          if (cashRoundSupport = 1) then begin
+            //zaokruhlenie hotovosti sa posiela ako polozka dokladu
+            if (roundSum <> 0) then begin
+              s := '^DcentovÈ vyrovnanie^k         ';
+              if (roundSum > 0) then
+                s := s + ESC + '3NNC' //kladne zaokruhlenie - 3NNC
+              else
+                s := s + ESC + '6ANC'; //zaporne zaokruhlenie - 6ANC
+              s := s + value_x(roundSum,2)+' EUR';
+              sl.Add(s);
+            end;
+          end;
+
+          //konecna suma
+          sl.Add(ESC+'k'+ifThen(cashRoundSupport = 1,
+                                value_x(totalSum+roundSum,2),
+                                value_x(totalSum,2)));
+
+          //variabilna paticka
+          if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then
+            sl.Add(LeftStr('Meno: ' + reqObj.S['ReceiptData.Custom.Cashier'], 40));
+          if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then
+            sl.Add(LeftStr('⁄Ëel: '+ reqObj.S['ReceiptData.Custom.Purpose'],40));
+
+          //platidla
+          sl.Add(ESC+'P1'+ value_x(reqObj.C['ReceiptData.Custom.PaymentCash'],2));
+          if (reqObj.C['ReceiptData.Custom.PaymentCard'] <> 0) then
+            sl.Add(ESC+'P2'+ value_x(reqObj.C['ReceiptData.Custom.PaymentCard'],2));
+
+          //koniec dokladu
+          sl.Add(ESC+'e');
+
+          //otvorenie zasuvky
+          sl.Add(ESC+'o');
+
+          err := fVaros._Receipt(sl.Text);
+          if (err <> 0) then exit;
+          err := getInfoFile(info);
+          if (err <> 0) then exit;
+
+          if (info.stav = 1) then begin
+            uidOkp := getReference(info);
+            result := Format('{"message":"Doklad UID:%s ˙speöne zaevidovan˝ a odoslan˝ do tlaËiarne.",'+
+                             '"uid":"%s"}',[uidOkp,uidOkp]);
+
+            if fSettings.B['ekasa.copyInvoice'] then err := fVaros._Receiptcopy();
+          end
+          else
+            err := info.stav;
+        end;
+
+        if (reqObj.S['ReceiptData.ReceiptType'] = 'VK') then begin
+
+          totalSum := reqObj.C['ReceiptData.Amount'];
+
+          sl.Add(ESC+'V'+'^t');
+          sl.Add(ESC+'k'+value_x(totalSum,2));
+
+          //variabilna paticka
+          if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then
+            sl.Add(Copy('Meno: ' + reqObj.S['ReceiptData.Custom.Cashier'], 0, 40));
+          if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then
+            sl.Add(Copy('⁄Ëel: ' + reqObj.S['ReceiptData.Custom.Purpose'],0 ,40));
+
+          //platidla
+          sl.Add(ESC+'P1'+value_x(totalSum,2));
+
+          //koniec dokladu
+          sl.Add(ESC+'e');
+
+          //otvorenie zasuvky
+          sl.Add(ESC+'o');
+
+          err := fVaros._Receipt(sl.Text);
+          if (err <> 0) then exit;
+          err := getInfoFile(info);
+          if (err <> 0) then exit;
+          if (info.stav = 1) then begin
+            uidOkp := getReference(info);
+            result := Format('{"message":"Doklad UID:%s ˙speöne zaevidovan˝ a odoslan˝ do tlaËiarne.",'+
+                             '"uid":"%s"}',[uidOkp,uidOkp]);
+          end
+          else
+            err := info.stav;
+        end;
+
+        if (reqObj.S['ReceiptData.ReceiptType'] = 'VY') then begin
+
+          totalSum := - reqObj.C['ReceiptData.Amount'];
+
+          sl.Add(ESC+'v'+'^t');
+          sl.Add(ESC+'k'+value_x(totalSum,2));
+
+          //variabilna paticka
+          if not Empty(reqObj.S['ReceiptData.Custom.Cashier']) then
+            sl.Add(Copy('Meno: ' + reqObj.S['ReceiptData.Custom.Cashier'], 0, 40));
+          if not Empty(reqObj.S['ReceiptData.Custom.Purpose']) then
+            sl.Add(Copy('⁄Ëel: ' + reqObj.S['ReceiptData.Custom.Purpose'],0 ,40));
+
+          //platidla
+          sl.Add(ESC+'P1'+value_x(totalSum,2));
+
+          //koniec dokladu
+          sl.Add(ESC+'e');
+
+          //otvorenie zasuvky
+          sl.Add(ESC+'o');
+
+          err := fVaros._Receipt(sl.Text);
+          if (err <> 0) then exit;
+          err := getInfoFile(info);
+          if (err <> 0) then exit;
+          if (info.stav = 1) then begin
+            uidOkp := getReference(info);
+            result := Format('{"message":"Doklad UID:%s ˙speöne zaevidovan˝ a odoslan˝ do tlaËiarne.",'+
+                             '"uid":"%s"}',[uidOkp,uidOkp]);
+          end
+          else
+            err := info.stav;
+        end;
+
+      finally
+        sl.Free;
+      end;
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeLocationGps(): string;
+var
+  err: integer;
+  sl: TStringList;
+  reqObj: ISuperObject;
+  info: TInfoFile;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      sl := TStringList.Create;
+      reqObj := SO(reqData);
+      try
+        sl.Clear;
+        sl.Add(ESC+'G');
+        sl.Add('^GX'+reqObj.S['Gps.AxisX']+'^k'); //mandatory
+        sl.Add('^GY'+reqObj.S['Gps.AxisY']+'^k'); //mandatory
+        sl.Add(ESC+'e');
+
+        err := fVaros._Location(sl.Text);
+        if (err <> 0) then exit;
+        err := getInfoFile(info);
+        if (err <> 0) then exit;
+        if ((info.stav = 1) and (info.uid = 'GPS')) then
+          result := '{"message":"Poloha ˙speöne zaevidovan·"}'
+        else
+          err := info.stav;
+
+      finally
+        sl.Free;
+      end;
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeLocationAddress(): string;
+var
+  err: integer;
+  sl: TStringList;
+  reqObj: ISuperObject;
+  info: TInfoFile;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      sl := TStringList.Create;
+      reqObj := SO(reqData);
+      try
+        sl.Clear;
+        sl.Add(ESC+'G');
+        sl.Add('^AS'+reqObj.S['PhysicalAddress.StreetName']+'^k'); //mandatory
+        sl.Add('^AM'+reqObj.S['PhysicalAddress.Municipality']+'^k'); //mandatory
+        if (reqObj.S['PhysicalAddress.BuildingNumber'] <> '') then
+          sl.Add('^AB'+reqObj.S['PhysicalAddress.BuildingNumber']+'^k'); //optional
+        if (reqObj.S['PhysicalAddress.PostalCode'] <> '') then
+          sl.Add('^AP'+reqObj.S['PhysicalAddress.PostalCode']+'^k'); //optional
+        if (reqObj.S['PhysicalAddress.PropertyRegistrationNumber'] <> '') then
+          sl.Add('^AN'+reqObj.S['PhysicalAddress.PropertyRegistrationNumber']+'^k');
+        sl.Add(ESC+'e');
+
+        err := fVaros._Location(sl.Text);
+        if (err <> 0) then exit;
+        err := getInfoFile(info);
+        if (err <> 0) then exit;
+        if ((info.stav = 1) and (info.uid = 'GPS')) then
+          result := '{"message":"Poloha ˙speöne zaevidovan·"}'
+        else
+          err := info.stav;
+
+      finally
+        sl.Free;
+      end;
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeLocationOther(): string;
+var
+  err: integer;
+  sl: TStringList;
+  reqObj: ISuperObject;
+  info: TInfoFile;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      sl := TStringList.Create;
+      reqObj := SO(reqData);
+      try
+        sl.Clear;
+        sl.Add(ESC+'G');
+        sl.Add('^O'+reqObj.S['Other']+'^k'); //mandatory
+        sl.Add(ESC+'e');
+
+        err := fVaros._Location(sl.Text);
+        if (err <> 0) then exit;
+        err := getInfoFile(info);
+        if (err <> 0) then exit;
+        if ((info.stav = 1) and (info.uid = 'GPS')) then
+          result := '{"message":"Poloha ˙speöne zaevidovan·"}'
+        else
+          err := info.stav;
+
+      finally
+        sl.Free;
+      end;
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeReport(): string;
+var
+  err: integer;
+  data,startPoint,endPoint,report: string;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      report := paramByName('type',reqParams);
+      if (Lowercase(report) = '') then begin
+        report := paramByName('datetimefrom',reqParams);
+        startPoint := getVarosNativeDate(report);
+        report := paramByName('datetimeto',reqParams);
+        endPoint := getVarosNativeDate(report);
+        data := ESC+'XD'+startPoint+CR+endPoint+CR+ESC+'e';
+        err := fVaros._Report(data);
+        if (err <> 0) then exit;
+        result := '{"message":"OK"}';
+      end
+      else if (Lowercase(report) = 'zreport') then begin
+        data := ESC+'d'+ESC+'e';
+        err := fVaros._Report(data);
+        if (err <> 0) then exit;
+        result := '{"message":"OK"}';
+      end
+      else if (Lowercase(report) = 'xreport') then begin
+        data := ESC+'x'+ESC+'e';
+        err := fVaros._Report(data);
+        if (err <> 0) then exit;
+        result := '{"message":"OK"}';
+      end
+      else begin
+        result := '{"errorCode":500,"error":"unsupported request"}';
+        exit;
+      end;
+
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativeSendunsent(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      err := fVaros._OfflineSend();
+      if (err <> 0) then exit;
+
+      result := '{"message":"Odosielanie neodoslan˝ch d·tov˝ch spr·v na server eKASA FS spustenÈ"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function varosNativePrncdkick(): string;
+var
+  err: integer;
+begin
+  result := '';
+  err := C_OK;
+  internalInit();
+  try
+    if varosOpen then begin
+      err := fVaros._DrawerOpen();
+      if (err <> 0) then exit;
+
+      result := '{"message":"OK"}';
+    end
+    else
+     result := rs_connection_error;
+  finally
+    if (err <> 0) then result := Format('{"errorCode":500,"errorEkasa":%d,"error":"%s"}',[err,errorStr(err)]);
+    internalClose();
+  end;
+end;
+
+function eKasaVarosNativeWork(action: TEkasaActions): string;
+begin
+  result := '';
+  case action of
+    actState: result := varosNativeState;
+    actSettingsGet: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSettingsPost: result := '{"errorCode":500,"error":"unsupported request"}';
+    actCopyLast: result := varosNativeCopyLast;
+    actCopyByUuid: result := '{"errorCode":500,"error":"unsupported request"}';
+    actCopyById: result := '{"errorCode":500,"error":"unsupported request"}';
+    actReceipt: result := varosNativeRecipt;
+    actReceiptStateId: result := '{"errorCode":500,"error":"unsupported request"}';
+    actLocationGps: result := varosNativeLocationGps;
+    actLocationAddress: result := varosNativeLocationAddress;
+    actLocationOther: result := varosNativeLocationOther;
+    actReport: result := varosNativeReport;
+    actUnsent: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSendunsent: result := varosNativeSendunsent;
+    actPrncdkick: result := varosNativePrncdkick;
+    actPrnfreeprint: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSenderror: result := '{"errorCode":500,"error":"unsupported request"}';
+    actExamplereceipt: result := '{"errorCode":500,"error":"unsupported request"}';
+    actSelectpayments: result := '{"errorCode":500,"error":"unsupported request"}';
+  end;
+end;
+
+initialization
+  clearVats();
+
+end.

@@ -1,0 +1,236 @@
+unit uEkasa;
+
+interface
+
+uses
+  SysUtils, Classes, IdHTTP, IdTCPClient, superObject,IdComponent,
+  {$IFDEF HTTPS}
+  IdSSLOpenSSL,
+  {$ENDIF}
+  IdCookieManager, IdURI, Controls;
+
+const
+  rs_connection_error = '{"error":"Nepodarilo sa spojenie s eKASA 8000. Skontrolujte ju!"}';
+  rs_connection_timeout = '{"error":"Prerušenie spojenia, resp. vypršal èas na odpoveï!"}';
+
+type
+  TEKASA = class
+  private
+    { Private declarations }
+    fContentEncoding: string;
+    fData: TStringStream;
+    fHttp: TIdHTTP;
+    fConnectionTimeOut: integer;
+
+    function getDataStream(data: string): TStringStream;
+    procedure setHeaders(http: TIdHTTP);
+    function getContent(content, contentEncoding: string): string;
+    function getStatusCode(): integer;
+    function checkConnection(host: string; port: word = 80): boolean;
+  public
+    { Public declarations }
+    property statusCode: integer read getStatusCode;
+    property connectionTimeOut: integer read fConnectionTimeOut write fConnectionTimeOut;
+    function post(url, data: string; checkConn: boolean = true): string;
+    function get(url: string; checkConn: boolean = true): string;
+
+    constructor Create();
+    destructor Destroy(); override;
+    procedure Free();
+  end;
+
+implementation
+
+uses
+  Dialogs, Windows, uEkasaPrinters, Main, uSettings;
+
+constructor TEKASA.Create();
+begin
+  fContentEncoding := '';
+  fData := TStringStream.Create();
+  fConnectionTimeOut := (120 * 1000);
+end;
+
+destructor TEKASA.Destroy;
+begin
+  if Assigned(fData) then fData.Free;
+  if Assigned(fHttp) then fHttp.Free;
+end;
+
+procedure TEKASA.Free;
+begin
+  Destroy();
+end;
+
+function TEKASA.getDataStream(data: string): TStringStream;
+var
+  stream: TStringStream;
+begin
+  stream := TStringStream.Create('', Tencoding.utf8);
+  stream.Clear;
+  stream.WriteString(data);
+  result := stream;
+end;
+
+procedure TEKASA.setHeaders(http: TIdHTTP);
+begin
+  http.ConnectTimeout := fConnectionTimeOut;
+  http.Request.CustomHeaders.Clear;
+end;
+
+function TEKASA.getContent(content, contentEncoding: string): string;
+begin
+  result := content;
+  fContentEncoding := SysUtils.UpperCase(contentEncoding);
+end;
+
+function TEKASA.getStatusCode(): integer;
+begin
+  result := fHttp.ResponseCode;
+end;
+
+function TEKASA.checkConnection(host: string; port: word): boolean;
+var
+  client: TIdTCPClient;
+begin
+  client := TIdTCPClient.Create(nil);
+  try
+    client.Host := host;
+    client.Port := port;
+    client.ConnectTimeout := 2000;
+    try
+      client.Connect;
+      result := client.Connected;
+    except
+      result := false;
+    end;
+  finally
+    client.Disconnect;
+    client.Free;
+  end;
+end;
+
+function TEKASA.post(url, data: string; checkConn: boolean = true): string;
+var
+  stream: TStringStream;
+  isConnect,repeatReq,timeOut: boolean;
+  stopTime: cardinal;
+  response: ISuperObject;
+begin
+  result := '';
+  if Assigned(fHttp) then FreeAndNil(fHttp);
+  fHttp := TIdHTTP.Create(nil);
+
+  isConnect := true;
+  if checkConn then
+    isConnect := checkConnection(fSettings.S['ekasa.hostAddress']);
+
+  if isConnect then begin
+    setHeaders(fHttp);
+    stream := getDataStream(data);
+    try
+      repeatReq := true; timeOut := false;
+      stopTime := GetTickCount + (25 * 1000);
+      repeat
+        Sleep(200);
+        try
+          result := fHttp.Post(url, stream);
+          timeOut := (stopTime < GetTickCount);
+          if (fHttp.ResponseCode in [200,201]) then begin
+            repeatReq := false;
+            if fSettings.B['ekasa.withLog'] then addLog(Format('Ekasa POST Request: url-%s, data-%s',[url,data]));
+          end;
+        except
+          on E: EIdHTTPProtocolException do begin
+            if (fHttp.ResponseCode = 500) then begin
+              result := E.ErrorMessage;
+              response := SO(E.ErrorMessage);
+              repeatReq := (response.I['errorCode'] = 10);
+            end;
+          end;
+        end;
+      until (repeatReq = false) or timeOut;
+
+      if timeOut then result := rs_connection_timeout;
+
+    finally
+      stream.Free;
+    end;
+  end
+  else
+    result := rs_connection_error;
+
+  if fSettings.B['ekasa.withLog'] then addLog(Format('Ekasa POST Response: result-%s',[result]));
+end;
+
+function TEKASA.get(url: string; checkConn: boolean = true): string;
+var
+  stream: TStringStream;
+  isConnect,repeatReq,timeOut: boolean;
+  stopTime: cardinal;
+  response: ISuperObject;
+  {$IFDEF HTTPS}
+  IOHandlerm: TIdSSLIOHandlerSocketOpenSSL;
+  {$ENDIF}
+begin
+  result := '';
+  if Assigned(fHttp) then FreeAndNil(fHttp);
+  fHttp := TIdHTTP.Create(nil);
+  {$IFDEF HTTPS}
+  if pos('HTTPS',uppercase(Url)) > 0 then begin
+    IOHandlerm := TIdSSLIOHandlerSocketOpenSSL.Create(nil);
+    with IOHandlerm do begin
+      SSLOptions.Method := sslvSSLv23;
+      SSLOptions.Mode := sslmUnassigned;
+      SSLOptions.VerifyMode := [];
+      SSLOptions.VerifyDepth := 0;
+      host := '';
+    end;
+    fHTTP.IOHandler := IOHandlerm;
+  end;
+  {$ENDIF}
+
+  isConnect := true;
+  if checkConn then
+    isConnect := checkConnection(fSettings.S['ekasa.hostAddress']);
+
+  if isConnect then begin
+    setHeaders(fHttp);
+    stream := TStringStream.Create('', TEncoding.UTF8);
+    try
+      repeatReq := true; timeOut := false;
+      stopTime := GetTickCount + (25 * 1000);
+      repeat
+        Sleep(200);
+        try
+          fHttp.Get(url,stream);
+          result := getContent(stream.DataString, fHttp.Response.ContentEncoding);
+          timeOut := (stopTime < GetTickCount);
+          if (fHttp.ResponseCode in [200,201]) then begin
+            repeatReq := false;
+            if fSettings.B['ekasa.withLog'] then addLog(Format('Ekasa GET Request: url-%s',[url]));
+          end;
+        except
+          on E: EIdHTTPProtocolException do begin
+            if (fHttp.ResponseCode = 500) then begin
+              result := E.ErrorMessage;
+              response := SO(E.ErrorMessage);
+              repeatReq := (response.I['errorCode'] = 10);
+            end;
+          end;
+        end;
+      until (repeatReq = false) or timeOut;
+
+      if timeOut then result := rs_connection_timeout;
+
+    finally
+      stream.Free;
+    end;
+  end
+  else
+    result := rs_connection_error;
+
+  if fSettings.B['ekasa.withLog'] then addLog(Format('Ekasa GET Response: result-%s',[result]));
+end;
+
+end.

@@ -1,195 +1,221 @@
-<script lang="ts">
-//import { defineComponent } from "vue";
-const dev = true;
-export default {
-  setup() {
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
 
-  },
-  data() {
-    return {
-      ekasaSet: false,
-      scannerSet: false,
-      settings: {
-        ekasa: {},
-        scanner: {}
-      } as any,
-      ekasaTyps: [
-        { id: 0, name: "Nepoužívať" },
-        { id: 1, name: "MRP eKasa 8000" },
-        { id: 2, name: "Fiskal PRO" },
-        { id: 3, name: "Elcom Efox" },
-        { id: 4, name: "Elcom Euro-50T Mini" },
-        { id: 5, name: "Elcom Euro-50TE Mini" },
-        { id: 6, name: "Elcom Euro-50TE Cash (iba úhrada faktúry)" },
-        { id: 7, name: "Elcom Euro-50TE Medi" },
-        { id: 8, name: "Elcom Euro-50TE Smart (iba úhrada faktúry)" },
-        { id: 9, name: "Elcom Euro-150TE Flexy" },
-        { id: 10, name: "Elcom Euro-150TE Flexy Plus" },
-        { id: 11, name: "Elcom Euro-80B" },
-        { id: 12, name: "Elcom Euro-50iTE Mini" },
-        { id: 13, name: "Elcom Euro-50iTE Cash" },
-        { id: 14, name: "Elcom Euro-150iTE Flexy" },
-        { id: 15, name: "Elcom Euro-150iTE Flexy Plus" },
-        { id: 16, name: "Elcom Euro-2100i" },
-        { id: 17, name: "Varos - eFT4000B/eFT5000B" },
-        { id: 18, name: "Varos - eFT4000/FT5000" },
-        { id: 19, name: "Bowa" },
-        { id: 20, name: "Upos" },
-      ],
-      ekasaConnections: [
-        { id: 0, name: "COM" },
-        { id: 1, name: "USB" },
-        { id: 2, name: "TCP" },
-      ],
-      comPorts: [
-        { id: 1, name: "COM1" },
-        { id: 2, name: "COM2" },
-        { id: 3, name: "COM3" },
-        { id: 4, name: "COM4" },
-        { id: 5, name: "COM5" },
-        { id: 6, name: "COM6" },
-        { id: 7, name: "COM7" },
-        { id: 8, name: "COM8" },
-        { id: 9, name: "COM9" },
-      ],
-      baudRates: [
-        { id: 6, name: "9600" },
-        { id: 7, name: "14400" },
-        { id: 8, name: "19200" },
-        { id: 9, name: "38400" },
-        { id: 10, name: "56000" },
-        { id: 11, name: "57600" },
-        { id: 12, name: "115200" },
-        { id: 13, name: "128000" },
-        { id: 14, name: "256000" },
-      ],
-      paritys: [
-        { id: 0, name: "None" },
-        { id: 1, name: "Odd" },
-        { id: 2, name: "Even" },
-        { id: 3, name: "Mark" },
-        { id: 4, name: "Space" },
-      ],
-      dataBits: [
-        { id: 0, name: "4" },
-        { id: 1, name: "5" },
-        { id: 2, name: "6" },
-        { id: 3, name: "7" },
-        { id: 4, name: "8" },
-      ],
-      stopBits: [
-        { id: 0, name: "One" },
-        { id: 1, name: "OneAndHalf" },
-        { id: 2, name: "Two" },
-      ],
-      flowControls: [
-        { id: 0, name: "None" },
-        { id: 1, name: "XonXOff" },
-        { id: 2, name: "RtsCts" },
-        { id: 3, name: "DtrDsr" },
-      ],
-      alertData: <{ message?: string; type?: string; timeout?: Number }>{},
-      devEnv: dev,
-      baseUrl: dev ? "http://192.168.30.129/" : location.href,
-    };
-  },
+const devEnv = true;
+const ekasaSet = ref(false);
+const scannerSet = ref(false);
+const ekasaTyps = [
+  { id: 0, name: "Nepoužívať" },
+  { id: 1, name: "MRP eKasa 8000" },
+  { id: 2, name: "Fiskal PRO" },
+  { id: 3, name: "Elcom Efox" },
+  { id: 4, name: "Elcom Euro-50T Mini" },
+  { id: 5, name: "Elcom Euro-50TE Mini" },
+  { id: 6, name: "Elcom Euro-50TE Cash (iba úhrada faktúry)" },
+  { id: 7, name: "Elcom Euro-50TE Medi" },
+  { id: 8, name: "Elcom Euro-50TE Smart (iba úhrada faktúry)" },
+  { id: 9, name: "Elcom Euro-150TE Flexy" },
+  { id: 10, name: "Elcom Euro-150TE Flexy Plus" },
+  { id: 11, name: "Elcom Euro-80B" },
+  { id: 12, name: "Elcom Euro-50iTE Mini" },
+  { id: 13, name: "Elcom Euro-50iTE Cash" },
+  { id: 14, name: "Elcom Euro-150iTE Flexy" },
+  { id: 15, name: "Elcom Euro-150iTE Flexy Plus" },
+  { id: 16, name: "Elcom Euro-2100i" },
+  { id: 17, name: "Varos - eFT4000B/eFT5000B" },
+  { id: 18, name: "Varos - eFT4000/FT5000" },
+  { id: 19, name: "Bowa" }
+];
 
-  methods: {
-    keyClick(keyName: any) {
-      //console.log(keyName, "keyClick");
-    },
-    async fetchSettings() {
-      try {
-        const response = await fetch(this.baseUrl + "api/settings");
-        this.settings = await response.json();
-      } catch (error) {
-        this.showAlert(String(error), "alert-danger");
-      }
-    },
-    async postData(url = "", data = {}) {
-      // Default options are marked with *
-      const response = await fetch(url, {
-        method: "POST", // *GET, POST, PUT, DELETE, etc.
-        //mode: "cors", // no-cors, *cors, same-origin
-        cache: "no-cache", // *default, no-cache, reload, force-cache, only-if-cached
-        //credentials: "same-origin", // include, *same-origin, omit
-        headers: {
-          "Content-Type": "application/json",
-        },
-        //redirect: "follow", // manual, *follow, error
-        //referrerPolicy: "no-referrer", // no-referrer, *no-referrer-when-downgrade, origin, origin-when-cross-origin, same-origin, strict-origin, strict-origin-when-cross-origin, unsafe-url
-        body: JSON.stringify(data), // body data type must match "Content-Type" header
-      });
-      return response.json(); // parses JSON response into native JavaScript objects
-    },
-    onChangeEkasaTyp(event: any) {
-      this.settings.ekasa.typ = Number(event.target.value);
-      this.settings.ekasa.typStr = this.ekasaTyps[this.settings.ekasa.typ].name;
-    },
-    onChangeConnection(event: any) {
-      this.settings.ekasa.connectionTyp = Number(event.target.value);
-    },
-    onChangeDrawer(event: any) {
-      this.settings.ekasa.drawer = Number(event.target.value);
-    },
-    onChangeHeaderBitmap(event: any) {
-      this.settings.ekasa.headerBitmap = Number(event.target.value);
-    },
-    onChangeFooterBitmap(event: any) {
-      this.settings.ekasa.footerBitmap = Number(event.target.value);
-    },
-    onChangeComPort(event: any) {
-      this.settings.scanner.comPort = Number(event.target.value);
-    },
-    onChangeBaudrate(event: any) {
-      this.settings.scanner.baudRate = Number(event.target.value);
-    },
-    onChangeParity(event: any) {
-      this.settings.scanner.parity = Number(event.target.value);
-    },
-    onChangeDatabits(event: any) {
-      this.settings.scanner.dataBits = Number(event.target.value);
-    },
-    onChangeStopbits(event: any) {
-      this.settings.scanner.stopBits = Number(event.target.value);
-    },
-    showAlert(message: string, type = "alert-success", timeout = 250000) {
-      this.alertData = { message, type };
-      setTimeout(() => {
-        this.alertData = {};
-      }, timeout);
-    },
-    async onSave() {
-      try {
-        const response = await this.postData(this.baseUrl + "api/settings", this.settings);
-        this.showAlert("Nastavenie uložené");
-        this.showSettings('overview');
-      } catch (error) {
-        this.showAlert(String(error), "alert-danger");
-      }
-    },
-    onCopy() {
-      let textarea = document.getElementById("bearerToken") as any;
-      textarea.select();
-      document.execCommand("copy");
-    },
-    showSettings(item: string) {
-      if (item === 'overview') {
-        this.ekasaSet = false
-        this.scannerSet = false
-      }
-      if (item === 'ekasa') {
-        this.ekasaSet = true
-        this.scannerSet = false
-      }
-      if (item === 'scanner') {
-        this.ekasaSet = false
-        this.scannerSet = true
-      }
-    }
+const settings = ref({
+  bearerToken: "",
+  ekasa: {
+    typ: 0,
+    connectionTyp: 0,
+    drawer: 0,
+    headerBitmap: 0,
+    withLog: false,
+    vatPayer: true,
+    footerBitmap: 0,
+    printFullName: true,
+    typStr: "",
+    footer: "",
+    header: "",
+    comPort: 1,
+    hostAddress: "127.0.0.1",
+    copyInvoice: false
   },
-  async mounted() {
-    await this.fetchSettings();
+  scanner: {
+    dataBits: 4,
+    use: false,
+    parity: 0,
+    stopBits: 0,
+    comPort: 3,
+    flowControl: 0,
+    baudRate: 12
+  }
+});
+
+const ekasaConnections = [
+  { id: 0, name: "COM" },
+  { id: 1, name: "USB" },
+  { id: 2, name: "TCP" },
+];
+const comPorts = [
+  { id: 1, name: "COM1" },
+  { id: 2, name: "COM2" },
+  { id: 3, name: "COM3" },
+  { id: 4, name: "COM4" },
+  { id: 5, name: "COM5" },
+  { id: 6, name: "COM6" },
+  { id: 7, name: "COM7" },
+  { id: 8, name: "COM8" },
+  { id: 9, name: "COM9" },
+];
+const baudRates = [
+  { id: 6, name: "9600" },
+  { id: 7, name: "14400" },
+  { id: 8, name: "19200" },
+  { id: 9, name: "38400" },
+  { id: 10, name: "56000" },
+  { id: 11, name: "57600" },
+  { id: 12, name: "115200" },
+  { id: 13, name: "128000" },
+  { id: 14, name: "256000" },
+];
+const paritys = [
+  { id: 0, name: "None" },
+  { id: 1, name: "Odd" },
+  { id: 2, name: "Even" },
+  { id: 3, name: "Mark" },
+  { id: 4, name: "Space" },
+];
+const dataBits = [
+  { id: 0, name: "4" },
+  { id: 1, name: "5" },
+  { id: 2, name: "6" },
+  { id: 3, name: "7" },
+  { id: 4, name: "8" },
+];
+const stopBits = [
+  { id: 0, name: "One" },
+  { id: 1, name: "OneAndHalf" },
+  { id: 2, name: "Two" },
+];
+const flowControls = [
+  { id: 0, name: "None" },
+  { id: 1, name: "XonXOff" },
+  { id: 2, name: "RtsCts" },
+  { id: 3, name: "DtrDsr" },
+];
+
+const alertData = ref(<any>{}); //{ message?: string; type?: string; timeout?: Number }
+const baseUrl = devEnv ? "http://192.168.60.128/" : location.href;
+
+const showAlert = (message: string, type = "alert-success", timeout = 3000) => {
+  alertData.value = { message: message, type: type };
+  setTimeout(() => {
+    alertData.value = {};
+  }, timeout);
+};
+
+onMounted(() => {
+  fetch(`${baseUrl}api/settings`)
+    .then(response => {
+      if (!response.ok) throw new Error("Network response was not ok");
+      return response.json();
+    })
+    .then(data => {
+      settings.value = data;
+    })
+    .catch(error => {
+      showAlert(String(error), "alert-danger");
+    });
+});
+
+const onChangeEkasaTyp = (event: any) => {
+  settings.value.ekasa.typ = Number(event.target.value);
+  settings.value.ekasa.typStr = ekasaTyps[settings.value.ekasa.typ].name;
+};
+
+const onChangeConnection = (event: any) => {
+  settings.value.ekasa.connectionTyp = Number(event.target.value);
+};
+
+const onChangeDrawer = (event: any) => {
+  settings.value.ekasa.drawer = Number(event.target.value);
+};
+
+const onChangeHeaderBitmap = (event: any) => {
+  settings.value.ekasa.headerBitmap = Number(event.target.value);
+};
+
+const onChangeFooterBitmap = (event: any) => {
+  settings.value.ekasa.footerBitmap = Number(event.target.value);
+};
+
+const onChangeComPort = (event: any) => {
+  settings.value.scanner.comPort = Number(event.target.value);
+};
+
+const onChangeBaudrate = (event: any) => {
+  settings.value.scanner.baudRate = Number(event.target.value);
+};
+
+const onChangeParity = (event: any) => {
+  settings.value.scanner.parity = Number(event.target.value);
+};
+
+const onChangeDatabits = (event: any) => {
+  settings.value.scanner.dataBits = Number(event.target.value);
+};
+
+const onChangeStopbits = (event: any) => {
+  settings.value.scanner.stopBits = Number(event.target.value);
+};
+
+const showSettings = (item: string) => {
+  if (item === 'overview') {
+    ekasaSet.value = false
+    scannerSet.value = false
+  }
+  if (item === 'ekasa') {
+    ekasaSet.value = true
+    scannerSet.value = false
+  }
+  if (item === 'scanner') {
+    ekasaSet.value = false
+    scannerSet.value = true
+  }
+};
+
+const onSave = () => {
+  fetch(`${baseUrl}api/settings`, { method: "POST", cache: "no-cache", headers: { "Content-Type": "application/json", body: JSON.stringify(settings.value) } })
+    .then(response => {
+      if (!response.ok) throw new Error("Network response was not ok");
+      return response.json();
+    })
+    .then(() => {
+      showAlert("Nastavenie uložené");
+      showSettings('overview');
+    })
+    .catch(error => {
+      showAlert(String(error), "alert-danger");
+    })
+};
+
+const onCopy = () => {
+  const textarea = document.getElementById("bearerToken") as HTMLTextAreaElement | null;
+  if (!textarea) return;
+
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(textarea.value)
+      .then(() => console.log("Copied using Clipboard API!"))
+      .catch(err => console.error("Clipboard API failed", err));
+  } else {
+    textarea.select();
+    document.execCommand("copy");
+    console.log("Fallback: Copied using execCommand.");
   }
 };
 </script>
@@ -208,7 +234,7 @@ export default {
           <a style="float: left; display: inline-block">
             <img alt="MRP účtovníctvo mzdy sklad fakturácia" class="logo" height="80" src="./assets/logo_mrp.png" />
           </a>
-          <h1 class="app-name">eKASA Printer</h1>
+          <h1 class="app-name">eKasa print server</h1>
         </div>
         <div class="col-md-6 button-container">
           <div type="button" class="btn btn-light" style="margin: 10px" @click="showSettings('overview')">Prehľad</div>
@@ -244,7 +270,7 @@ export default {
           </div>
           <div class="card-body">
             {{ settings.scanner.use ? 'Scanner pripojený na COM' + String(settings.scanner.comPort) :
-             'Scanner sa nepoužíva'}}
+              'Scanner sa nepoužíva' }}
           </div>
         </div>
       </div>
@@ -534,7 +560,7 @@ export default {
       </div>
     </div>
 
-<!-- 
+    <!-- 
     <div class="row" v-if="devEnv">
       {{ settings }}
     </div> -->

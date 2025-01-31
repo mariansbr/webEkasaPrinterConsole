@@ -109,6 +109,7 @@ begin
     onChangeObj := true;
   end;
 
+
   if (fSettings.O['ekasa.hostAddress'] = nil) then
   begin
     fSettings.S['ekasa.hostAddress'] := '127.0.0.1';

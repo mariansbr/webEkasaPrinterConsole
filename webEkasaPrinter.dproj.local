@@ -1,17 +1,17 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <BorlandProject>
 	<Transactions>
-    <Transaction>2024/02/07 13:35:19.000.757,C:\Projects\webEkasaPrinterConsole\webEkasaPrinter.dproj=C:\Users\MrpDev\OneDrive\Dokumenty\RAD Studio\Projects\Project1.dproj</Transaction>
+    <Transaction>2024/02/07 13:35:19.000.757,C:\Users\MrpDev\OneDrive\Dokumenty\RAD Studio\Projects\Project1.dproj=C:\Projects\webEkasaPrinterConsole\webEkasaPrinter.dproj</Transaction>
     <Transaction>2024/02/07 13:58:36.000.603,=C:\Projects\webEkasaPrinterConsole\uServer.pas</Transaction>
     <Transaction>2024/02/07 14:11:19.000.343,=C:\Projects\webEkasaPrinterConsole\components\superObject\superdate.pas</Transaction>
     <Transaction>2024/02/07 14:11:41.000.802,=C:\Projects\webEkasaPrinterConsole\components\superObject\superobject.pas</Transaction>
     <Transaction>2024/02/07 14:11:50.000.426,=C:\Projects\webEkasaPrinterConsole\components\superObject\supertimezone.pas</Transaction>
     <Transaction>2024/02/07 14:11:57.000.959,=C:\Projects\webEkasaPrinterConsole\components\superObject\supertypes.pas</Transaction>
-    <Transaction>2024/02/07 14:14:38.000.873,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaVarosNative.pas</Transaction>
-    <Transaction>2024/02/07 14:14:38.000.684,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaElcomm.pas</Transaction>
-    <Transaction>2024/02/07 14:14:38.000.808,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaMrp.pas</Transaction>
     <Transaction>2024/02/07 14:14:38.000.748,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaFiskalPro.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.684,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaElcomm.pas</Transaction>
     <Transaction>2024/02/07 14:14:38.000.990,=C:\Projects\webEkasaPrinterConsole\ekasa\Elcomm_TLB_3_0.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.808,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaMrp.pas</Transaction>
+    <Transaction>2024/02/07 14:14:38.000.873,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaVarosNative.pas</Transaction>
     <Transaction>2024/02/07 14:14:38.000.608,=C:\Projects\webEkasaPrinterConsole\ekasa\eKasaBowa.pas</Transaction>
     <Transaction>2024/02/07 14:14:38.000.924,=C:\Projects\webEkasaPrinterConsole\ekasa\ekMrp.pas</Transaction>
     <Transaction>2024/02/07 14:14:39.000.148,=C:\Projects\webEkasaPrinterConsole\ekasa\FMEkasa.pas</Transaction>

@@ -127,20 +127,25 @@ var
 
   function isAuthorization(headers: string): boolean;
   var
-    i: integer;
-    sl: TSTringList;
+    i,bearerPos: integer;
+    sl: TStringList;
+    bearerToken: string;
+  const
+    authBearerStr = 'authorization: bearer ';
   begin
     result := false;
-    sl := TSTringList.Create;
+    sl := TStringList.Create;
     try
       sl.LineBreak := '';
       sl.Text := headers;
-      for i := 0 to sl.Count - 1 do
-      begin
-        if (Pos('authorization', LowerCase(sl.Strings[i])) > 0) then
-        begin
-          result := true;
-          break;
+      for i := 0 to sl.Count - 1 do begin
+        bearerPos := Pos(LowerCase(authBearerStr), LowerCase(sl.Strings[i]));
+        if (bearerPos > 0) then begin
+          bearerToken := Copy(sl.Strings[i], bearerPos + Length(authBearerStr), MaxInt);
+          if (bearerToken = fSettings.S['web.bearerToken']) then begin
+            result := true;
+            break;
+          end;
         end;
       end;
     finally
@@ -162,8 +167,6 @@ begin
   AResponseInfo.CustomHeaders.Add('Access-Control-Allow-Credentials: true');
 
   requestDocument := ARequestInfo.document;
-
-  // addLog(ARequestInfo.RemoteIp+' - '+ARequestInfo.Command+' - '+ARequestInfo.Document+' - '+DateTimeToStr(ARequestInfo.Date));
   logText := ARequestInfo.RemoteIp + ' - ' + ARequestInfo.Command + ' - ' +  ARequestInfo.document;
 
   if ARequestInfo.Command = C_GET then
@@ -197,28 +200,27 @@ begin
         scancode := '';
       end
       else begin
-        AResponseInfo.ContentType := 'text/html';
+        AResponseInfo.ContentType := 'application/json';
         AResponseInfo.ResponseNo := 400;
-        AResponseInfo.ContentText := 'The scanner is not use or is not configured';
+        AResponseInfo.ContentText := Format(C_RESULT_ER, [400, 'The scanner is not use or is not configured']);
         logText := logText + ' => The scanner is not use or is not configured';
       end;
     end
     else if uEkasaHelper.isEkasaApi(requestDocument) then begin
       if not isAuthorization(ARequestInfo.RawHeaders.Text) then begin
-        AResponseInfo.ContentType := 'text/html; charset=utf-8';
+        AResponseInfo.ContentType := 'application/json';
         AResponseInfo.ResponseNo := 401;
-        AResponseInfo.ContentText := 'Unsupported authorization scheme.';
+        AResponseInfo.ContentText := Format(C_RESULT_ER, [401, 'Unsupported authorization scheme.']);
         logText := logText + ' => Unsupported authorization scheme';
         exit;
       end;
       eKasaCmd(requestDocument, ARequestInfo, AResponseInfo);
     end
     else begin
-      AResponseInfo.ContentType := 'text/html';
+      AResponseInfo.ContentType := 'application/json';
       AResponseInfo.ResponseNo := 400;
-      AResponseInfo.ContentText := Format(SERROR_BAD_REQUEST,
-        [requestDocument]);
-      logText := logText + ' => ' + SERROR_BAD_REQUEST;
+      AResponseInfo.ContentText := Format(C_RESULT_ER, [400, Format('Bad request %s',[requestDocument])]);
+      logText := logText + ' => Bad request';
     end;
   end;
 
@@ -232,11 +234,10 @@ begin
       logText := logText + ' => ' + AResponseInfo.ContentText;
     end
     else begin
-      AResponseInfo.ContentType := 'text/html';
+      AResponseInfo.ContentType := 'application/json';
       AResponseInfo.ResponseNo := 400;
-      AResponseInfo.ContentText := Format(SERROR_BAD_REQUEST,
-        [requestDocument]);
-      logText := logText + ' => ' + SERROR_BAD_REQUEST;
+      AResponseInfo.ContentText := Format(C_RESULT_ER, [400, Format('Bad request %s',[requestDocument])]);
+      logText := logText + ' => Bad request';
     end;
   end;
 
